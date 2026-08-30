@@ -16,12 +16,14 @@ class MessageBubble extends StatelessWidget {
   final ChatMessage message;
   final Color? avatarColor;
   final String? avatarEmoji;
+  final String? avatarImagePath;
 
   const MessageBubble({
     super.key,
     required this.message,
     this.avatarColor,
     this.avatarEmoji,
+    this.avatarImagePath,
   });
 
   @override
@@ -34,6 +36,7 @@ class MessageBubble extends StatelessWidget {
           message: message,
           avatarColor: avatarColor,
           avatarEmoji: avatarEmoji,
+          avatarImagePath: avatarImagePath,
         );
       case ChatMessageRole.tool:
         return _ToolBubble(message: message);
@@ -103,10 +106,12 @@ class _ReceivedBubble extends StatelessWidget {
   final ChatMessage message;
   final Color? avatarColor;
   final String? avatarEmoji;
+  final String? avatarImagePath;
   const _ReceivedBubble({
     required this.message,
     this.avatarColor,
     this.avatarEmoji,
+    this.avatarImagePath,
   });
 
   @override
@@ -131,6 +136,7 @@ class _ReceivedBubble extends StatelessWidget {
               label: '',
               color: avatarColor ?? scheme.primary,
               emoji: avatarEmoji,
+              imagePath: avatarImagePath,
               radius: 16,
             ),
           ),

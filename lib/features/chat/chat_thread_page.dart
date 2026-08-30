@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
 import 'package:share_plus/share_plus.dart';
+import '../../core/pets.dart';
 import '../../data/models.dart';
 import '../../state/app_state.dart';
 import '../../widgets/common.dart';
@@ -79,6 +80,9 @@ class _ChatThreadPageState extends State<ChatThreadPage> {
     final session = _session(state);
     final scheme = Theme.of(context).colorScheme;
     final messages = state.messagesFor(_effectiveId(state));
+    final agentName = session != null
+        ? resolveAgentName(state.servers, session)
+        : (widget.name ?? 'Hermes');
 
     return Scaffold(
       appBar: AppBar(
@@ -137,9 +141,7 @@ class _ChatThreadPageState extends State<ChatThreadPage> {
                               message: m,
                               avatarColor:
                                   session?.avatarColor ?? scheme.primary,
-                              avatarEmoji: session == null
-                                  ? null
-                                  : _emojiFor(session.title),
+                              avatarImagePath: petAssetForAgent(agentName),
                             )
                           : MessageBubble(message: m);
                       return _InteractiveBubble(message: m, child: bubble);

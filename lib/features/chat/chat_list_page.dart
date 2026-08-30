@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
+import '../../core/pets.dart';
 import '../../core/util/format.dart';
 import '../../data/models.dart';
 import '../../state/app_state.dart';
@@ -95,16 +96,7 @@ class _SessionTile extends StatelessWidget {
   });
 
   /// Line 1 — who you're chatting with.
-  String get _agentName {
-    for (final server in state.servers) {
-      for (final b in server.bots) {
-        if (b.id == session.profileId) return b.name;
-      }
-    }
-    final t = session.title;
-    if (t.startsWith('@')) return t;
-    return 'Hermes';
-  }
+  String get _agentName => resolveAgentName(state.servers, session);
 
   /// Line 2 — the subject of the conversation.
   String get _subject {
@@ -114,16 +106,6 @@ class _SessionTile extends StatelessWidget {
       return session.lastPreview;
     }
     return t;
-  }
-
-  String? get _emoji {
-    final a = _agentName.toLowerCase();
-    if (a.contains('patrick')) return '💪';
-    if (a.contains('homie') || a.contains('home')) return '🏠';
-    if (a.contains('boba')) return '🤖';
-    if (a.contains('financ')) return '💰';
-    if (a.contains('hermes')) return '🧠';
-    return null;
   }
 
   @override
@@ -155,7 +137,7 @@ class _SessionTile extends StatelessWidget {
         leading: Avatar(
           label: agent,
           color: session.avatarColor,
-          emoji: _emoji,
+          imagePath: petAssetForAgent(agent),
           hasUnread: unread,
         ),
         title: Row(

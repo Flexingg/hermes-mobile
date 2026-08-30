@@ -6,6 +6,7 @@ class Avatar extends StatelessWidget {
   final Color color;
   final double radius;
   final String? emoji;
+  final String? imagePath;
   final bool hasUnread;
 
   const Avatar({
@@ -14,6 +15,7 @@ class Avatar extends StatelessWidget {
     required this.color,
     this.radius = 22,
     this.emoji,
+    this.imagePath,
     this.hasUnread = false,
   });
 
@@ -26,16 +28,33 @@ class Avatar extends StatelessWidget {
         CircleAvatar(
           radius: radius,
           backgroundColor: color,
-          child: emoji != null
-              ? Text(emoji!, style: TextStyle(fontSize: radius * 0.95))
-              : Text(
-                  label.isEmpty ? '?' : label[0].toUpperCase(),
-                  style: TextStyle(
-                    fontSize: radius * 0.85,
-                    color: Colors.white,
-                    fontWeight: FontWeight.w600,
+          child: imagePath != null
+              ? ClipOval(
+                  child: Image.asset(
+                    imagePath!,
+                    fit: BoxFit.cover,
+                    width: radius * 2,
+                    height: radius * 2,
+                    errorBuilder: (_, _, _) => Text(
+                      label.isEmpty ? '?' : label[0].toUpperCase(),
+                      style: TextStyle(
+                        fontSize: radius * 0.85,
+                        color: Colors.white,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
                   ),
-                ),
+                )
+              : emoji != null
+                  ? Text(emoji!, style: TextStyle(fontSize: radius * 0.95))
+                  : Text(
+                      label.isEmpty ? '?' : label[0].toUpperCase(),
+                      style: TextStyle(
+                        fontSize: radius * 0.85,
+                        color: Colors.white,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
         ),
         if (hasUnread)
           Positioned(
