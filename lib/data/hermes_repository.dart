@@ -1,7 +1,9 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:typed_data';
 import 'dart:ui';
 import 'package:http/http.dart' as http;
+import 'package:http_parser/http_parser.dart';
 import 'package:web_socket_channel/web_socket_channel.dart';
 import 'app_repository.dart';
 import 'models.dart';
@@ -117,9 +119,16 @@ class HermesRepository implements AppRepository {
   }
 
   @override
-  Stream<ChatMessage> sendMessage(String sessionId, String text) async* {
+  Stream<ChatMessage> sendMessage(String sessionId, String text,
+      {List<Attachment> attachments = const []}) async* {
     // 1) Persist the user message.
-    await _post('/api/v1/sessions/$sessionId/messages', {'text': text});
+    await _post('/api/v1/sessions/$sessionId/messages', {
+      'text': text,
+      'attachments': attachments
+          .where((a) => a.path != null)
+          .map((a) => {'path': a.path, 'name': a.name, 'kind': a.kind})
+          .toList(),
+    });
 
     // 2) Stream the assistant reply over WebSocket.
     final wsUrl = baseUrl
@@ -169,6 +178,46 @@ class HermesRepository implements AppRepository {
         status: ChatMessageStatus.sent,
       );
     }
+  }
+
+  @override
+  Future<Attachment> uploadAttachment({
+    required String localPath,
+    required String name,
+    String? mimeType,
+  }) async {
+    final req = http.MultipartRequest(
+        'POST', Uri.parse('$baseUrl/api/v1/attachments'));
+    if (token != null) req.headers['Authorization'] = 'Bearer $token';
+    req.files.add(await http.MultipartFile.fromPath('file', localPath,
+        filename: name,
+        contentType: mimeType != null ? MediaType.parse(mimeType) : null));
+    final streamed = await req.send().timeout(const Duration(seconds: 90));
+    final res = await http.Response.fromStream(streamed);
+    if (res.statusCode >= 400) {
+      throw Exception('POST /attachments → ${res.statusCode}');
+    }
+    final d = jsonDecode(res.body) as Map<String, dynamic>;
+    return Attachment(
+      name: d['name'] as String? ?? name,
+      url: d['path'] as String? ?? '',
+      mimeType: mimeType ?? 'application/octet-stream',
+      sizeBytes: d['size'] as int?,
+      path: d['path'] as String?,
+      kind: d['kind'] as String?,
+      localPath: localPath,
+    );
+  }
+
+  @override
+  Future<Uint8List> downloadFile(String serverPath) async {
+    final uri = Uri.parse(
+        '$baseUrl/api/v1/files?path=${Uri.encodeQueryComponent(serverPath)}');
+    final res = await _client
+        .get(uri, headers: _headers)
+        .timeout(const Duration(seconds: 90));
+    if (res.statusCode >= 400) throw Exception('GET /files → ${res.statusCode}');
+    return res.bodyBytes;
   }
 
   @override
@@ -407,6 +456,16 @@ class HermesRepository implements AppRepository {
         text: j['text']?.toString() ?? '',
         timestamp: _dt(j['timestamp']),
         toolName: j['toolName']?.toString(),
+        attachments: (j['media'] as List? ?? [])
+            .whereType<Map<String, dynamic>>()
+            .map((m) => Attachment(
+                  name: m['name']?.toString() ?? 'file',
+                  url: m['path']?.toString() ?? '',
+                  mimeType: 'application/octet-stream',
+                  path: m['path']?.toString(),
+                  kind: 'file',
+                ))
+            .toList(),
       );
 
   /// Tolerant date parse — never throws on missing/malformed timestamps

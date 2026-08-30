@@ -27,10 +27,10 @@ import time
 from pathlib import Path
 
 import psutil
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
 from starlette.requests import Request
-from starlette.responses import JSONResponse
+from starlette.responses import JSONResponse, Response
 
 HERMES = Path(os.environ.get("HERMES_HOME", str(Path.home() / ".hermes")))
 STATE_DB = HERMES / "state.db"
@@ -50,6 +50,8 @@ FCM_SERVICE_ACCOUNT = os.environ.get(
     "FCM_SERVICE_ACCOUNT", "/home/hermes/.hermes/secrets/mercury-fcm-service-account.json"
 )
 DEVICE_TOKENS = HERMES / "mercury_devices.json"
+UPLOADS_DIR = HERMES / "uploads"
+UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
 
 app = FastAPI(title="Hermes Mobile bridge", version="1.0")
 app.add_middleware(
@@ -312,6 +314,7 @@ def messages(session_id: str):
                 "text": text,
                 "timestamp": _iso(r["timestamp"]),
                 "toolName": r["tool_name"],
+                "media": _media_in(text) if r["role"] == "assistant" else [],
             }
         )
     return out
@@ -328,6 +331,15 @@ def _tool_text(content, tool_name) -> str:
     except Exception:
         snippet = (content or "")[:160]
     return f"[{tool_name}] {snippet}"
+
+
+def _media_in(text: str | None) -> list[dict]:
+    """Find `MEDIA:<path>` references an agent used to hand a file to the user."""
+    out = []
+    for m in re.finditer(r"MEDIA:\s*(\S+)", text or ""):
+        p = Path(m.group(1)).expanduser()
+        out.append({"path": str(p), "name": p.name})
+    return out
 
 
 @app.post("/api/v1/sessions")
@@ -395,15 +407,37 @@ def chat_start(body: dict):
 @app.post("/api/v1/sessions/{session_id}/messages")
 def send_message(session_id: str, body: dict):
     text = (body.get("text") or "").strip()
-    if not text:
-        return {"ok": True, "pending": False}
-    _spawn_hermes(session_id, text)
+    attachments = body.get("attachments") or []
+    _spawn_hermes(session_id, text, attachments)
     return {"ok": True, "pending": True}
 
 
-def _spawn_hermes(session_id: str, text: str) -> None:
+def _spawn_hermes(session_id: str, text: str, attachments: list | None = None) -> None:
+    attachments = attachments or []
+    query = text
+    img_path = None
+    file_refs = []
+    for a in attachments:
+        p = (a.get("path") or "").strip()
+        if not p or not Path(p).exists():
+            continue
+        kind = (a.get("kind") or "file").lower()
+        name = (a.get("name") or Path(p).name)
+        if kind == "image" and img_path is None:
+            img_path = p
+        else:
+            file_refs.append(name)
+    # Tell the agent about non-image files so it can read them via tools.
+    if file_refs:
+        refs = ", ".join(file_refs)
+        query = (
+            f"{query}\n\n[Attached files: {refs}. Read them with read_file/search_files if needed.]"
+        )
+
     def run():
-        cmd = [HERMES_BIN, "chat", "-q", text, "--resume", session_id]
+        cmd = [HERMES_BIN, "chat", "-q", query, "--resume", session_id]
+        if img_path:
+            cmd += ["--image", img_path]
         proc = subprocess.Popen(
             cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True
         )
@@ -418,6 +452,48 @@ def _spawn_hermes(session_id: str, text: str) -> None:
 
     t = threading.Thread(target=run, daemon=True)
     t.start()
+
+
+@app.post("/api/v1/attachments")
+async def upload_attachment(file: UploadFile = File(...)):
+    """Accept an image/file from the app and stage it for the agent."""
+    import uuid
+
+    data = await file.read()
+    if len(data) > 50 * 1024 * 1024:
+        raise HTTPException(status_code=413, detail="file too large (max 50MB)")
+    safe_name = re.sub(r"[^\w.\-]+", "_", file.filename or "file")[-100:] or "file"
+    uid = uuid.uuid4().hex[:8]
+    dest = UPLOADS_DIR / f"{uid}_{safe_name}"
+    dest.write_bytes(data)
+    kind = "image" if (file.content_type or "").startswith("image/") else "file"
+    return {
+        "id": uid,
+        "path": str(dest),
+        "name": safe_name,
+        "size": len(data),
+        "kind": kind,
+    }
+
+
+@app.get("/api/v1/files")
+def get_file(path: str = ""):
+    """Download a file the agent produced / the app uploaded (within HERMES home)."""
+    if not path:
+        raise HTTPException(status_code=400, detail="path required")
+    p = Path(path).expanduser().resolve()
+    try:
+        p.relative_to(HERMES.resolve())
+    except ValueError:
+        raise HTTPException(status_code=403, detail="path outside home")
+    if not p.is_file():
+        raise HTTPException(status_code=404, detail="not found")
+    name = p.name
+    return Response(
+        content=p.read_bytes(),
+        media_type="application/octet-stream",
+        headers={"Content-Disposition": f'attachment; filename="{name}"'},
+    )
 
 
 @app.post("/api/v1/devices/register")

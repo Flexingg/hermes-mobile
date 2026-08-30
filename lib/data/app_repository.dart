@@ -1,3 +1,4 @@
+import 'dart:typed_data';
 import 'models.dart';
 
 /// The single source of truth interface the whole app talks to.
@@ -23,7 +24,16 @@ abstract class AppRepository {
     required String text,
   });
   /// Sends a message and returns a stream of the assistant reply as it streams.
-  Stream<ChatMessage> sendMessage(String sessionId, String text);
+  Stream<ChatMessage> sendMessage(String sessionId, String text,
+      {List<Attachment> attachments = const []});
+  /// Uploads an image/file to the bridge so the agent can use it.
+  Future<Attachment> uploadAttachment({
+    required String localPath,
+    required String name,
+    String? mimeType,
+  });
+  /// Downloads a file (agent-produced or uploaded) from the bridge by path.
+  Future<Uint8List> downloadFile(String serverPath);
   Future<void> markRead(String sessionId);
   Future<void> togglePinned(String sessionId);
   Future<void> toggleStarred(String sessionId);

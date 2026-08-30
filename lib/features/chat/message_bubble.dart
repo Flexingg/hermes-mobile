@@ -1,10 +1,14 @@
+import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter_markdown/flutter_markdown.dart';
+import 'package:path_provider/path_provider.dart';
 import 'package:provider/provider.dart';
+import 'package:share_plus/share_plus.dart';
 import '../../core/config/app_config.dart';
 import '../../core/theme/app_theme.dart';
 import '../../core/util/format.dart';
 import '../../data/models.dart';
+import '../../state/app_state.dart';
 import '../../widgets/common.dart';
 
 /// A single chat bubble, styled like Google Messages:
@@ -81,6 +85,10 @@ class _SentBubble extends StatelessWidget {
           children: [
             _SelectableText(
                 message.text, style: TextStyle(color: textColor, fontSize: 15)),
+            if (message.attachments.isNotEmpty) ...[
+              const SizedBox(height: 6),
+              ...message.attachments.map((a) => _SentAttachment(attachment: a)),
+            ],
             const SizedBox(height: 2),
             Row(
               mainAxisSize: MainAxisSize.min,
@@ -170,6 +178,11 @@ class _ReceivedBubble extends StatelessWidget {
                       selectable: true,
                       styleSheet: _mdStyle(context),
                     ),
+                  if (message.attachments.isNotEmpty) ...[
+                    const SizedBox(height: 6),
+                    ...message.attachments
+                        .map((a) => _DownloadChip(attachment: a)),
+                  ],
                   const SizedBox(height: 2),
                   Text(formatClock(message.timestamp),
                       style: TextStyle(
@@ -336,5 +349,78 @@ class _SelectableText extends StatelessWidget {
     return SelectionArea(
       child: Text(text, style: style),
     );
+  }
+}
+
+/// Preview of an attachment in a sent (user) bubble.
+class _SentAttachment extends StatelessWidget {
+  final Attachment attachment;
+  const _SentAttachment({required this.attachment});
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    final isImage = attachment.kind == 'image' ||
+        attachment.mimeType.startsWith('image/');
+    final local = attachment.localPath;
+    if (isImage && local != null && File(local).existsSync()) {
+      return ClipRRect(
+        borderRadius: BorderRadius.circular(10),
+        child: Image.file(File(local), width: 160, fit: BoxFit.cover),
+      );
+    }
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Icon(Icons.insert_drive_file_outlined, size: 16, color: scheme.onSurfaceVariant),
+        const SizedBox(width: 4),
+        Flexible(
+          child: Text(attachment.name,
+              style: const TextStyle(fontSize: 12),
+              overflow: TextOverflow.ellipsis),
+        ),
+      ],
+    );
+  }
+}
+
+/// Download chip for a file the agent handed to the user via a `MEDIA:<path>`
+/// reference in its reply.
+class _DownloadChip extends StatelessWidget {
+  final Attachment attachment;
+  const _DownloadChip({required this.attachment});
+
+  @override
+  Widget build(BuildContext context) {
+    return Align(
+      alignment: Alignment.centerLeft,
+      child: ActionChip(
+        avatar: const Icon(Icons.download_rounded, size: 16),
+        label: Text(attachment.name,
+            style: const TextStyle(fontSize: 12),
+            overflow: TextOverflow.ellipsis),
+        onPressed: () => _download(context),
+      ),
+    );
+  }
+
+  Future<void> _download(BuildContext context) async {
+    final state = context.read<AppState>();
+    final path = attachment.path;
+    if (path == null) return;
+    try {
+      final bytes = await state.repo.downloadFile(path);
+      final dir = await getTemporaryDirectory();
+      final f = File('${dir.path}/${attachment.name}');
+      await f.writeAsBytes(bytes);
+      if (!context.mounted) return;
+      await SharePlus.instance.share(ShareParams(files: [XFile(f.path)]));
+    } catch (e) {
+      if (context.mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Download failed: $e')),
+        );
+      }
+    }
   }
 }

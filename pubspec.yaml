@@ -16,7 +16,7 @@ publish_to: 'none' # Remove this line if you wish to publish to pub.dev
 # https://developer.apple.com/library/archive/documentation/General/Reference/InfoPlistKeyReference/Articles/CoreFoundationKeys.html
 # In Windows, build-name is used as the major, minor, and patch parts
 # of the product and file versions while build-number is used as the build suffix.
-version: 2.0.1+10
+version: 2.0.2+11
 
 environment:
   sdk: ^3.13.2
@@ -52,6 +52,11 @@ dependencies:
   flutter_local_notifications: ^22.3.0
   firebase_core: ^4.14.0
   firebase_messaging: ^16.6.0
+  http_parser: ^4.1.2
+  image_picker: ^1.2.3
+  file_picker: ^8.1.2
+  speech_to_text: ^7.4.0
+  path: ^1.9.1
 
 dev_dependencies:
   flutter_test:
@@ -104,3 +109,9 @@ flutter:
   #
   # For details regarding fonts from package dependencies,
   # see https://flutter.dev/to/font-from-package
+
+dependency_overrides:
+  # file_picker 8.x compiles its Android module at SDK 34; the newest
+  # flutter_plugin_android_lifecycle (2.0.3x) requires SDK 36 and breaks that
+  # module's AAR metadata check. Pin to a SDK-34-compatible release.
+  flutter_plugin_android_lifecycle: 2.0.22

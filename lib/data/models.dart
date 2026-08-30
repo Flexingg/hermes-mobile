@@ -13,11 +13,17 @@ class Attachment {
   final String url;
   final String mimeType;
   final int? sizeBytes;
+  final String? path; // server path (uploads / agent-produced) for sending + download
+  final String? kind; // 'image' | 'file'
+  final String? localPath; // local cached copy (for previews)
   const Attachment({
     required this.name,
     required this.url,
     required this.mimeType,
     this.sizeBytes,
+    this.path,
+    this.kind,
+    this.localPath,
   });
 }
 

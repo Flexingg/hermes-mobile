@@ -3,3 +3,4 @@ uvicorn[standard]
 psutil
 pyyaml
 firebase-admin
+python-multipart

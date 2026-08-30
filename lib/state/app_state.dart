@@ -248,7 +248,7 @@ class AppState extends ChangeNotifier {
     await refreshSessions();
   }
 
-  Future<void> sendMessage(String text) async {
+  Future<void> sendMessage(String text, {List<Attachment> attachments = const []}) async {
     final sid = activeSessionId;
     if (sid == null || sending) return;
     sending = true;
@@ -260,12 +260,13 @@ class AppState extends ChangeNotifier {
       role: ChatMessageRole.user,
       text: text,
       timestamp: DateTime.now(),
+      attachments: attachments,
     );
     _messages.putIfAbsent(sid, () => []).add(userMsg);
     notifyListeners();
 
     await _sub?.cancel();
-    _sub = repo.sendMessage(sid, text).listen((m) {
+    _sub = repo.sendMessage(sid, text, attachments: attachments).listen((m) {
       final list = _messages.putIfAbsent(sid, () => []);
       // Replace a streaming placeholder with the same id, else append.
       final idx = list.indexWhere((x) => x.id == m.id);
