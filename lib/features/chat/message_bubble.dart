@@ -76,11 +76,12 @@ class _SentBubble extends StatelessWidget {
               children: [
                 Text(formatClock(message.timestamp),
                     style: TextStyle(
-                        fontSize: 11, color: textColor.withOpacity(0.55))),
+                        fontSize: 11,
+                        color: textColor.withValues(alpha: 0.55))),
                 const SizedBox(width: 3),
                 Icon(Icons.done_all,
                     size: 14,
-                    color: textColor.withOpacity(0.55)),
+                    color: textColor.withValues(alpha: 0.55)),
               ],
             ),
           ],
@@ -157,7 +158,7 @@ class _ReceivedBubble extends StatelessWidget {
                   Text(formatClock(message.timestamp),
                       style: TextStyle(
                           fontSize: 11,
-                          color: scheme.onSurfaceVariant.withOpacity(0.7))),
+                          color: scheme.onSurfaceVariant.withValues(alpha: 0.7))),
                 ],
               ),
             ),

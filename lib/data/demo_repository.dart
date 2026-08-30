@@ -256,7 +256,7 @@ class DemoRepository implements AppRepository {
     _messages[id] = messages;
   }
 
-  ChatMessage _msg(String sessionId, String _from, String role, String text,
+  ChatMessage _msg(String sessionId, String from, String role, String text,
       {String? toolName}) {
     return ChatMessage(
       id: _id('m'),

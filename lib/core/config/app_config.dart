@@ -66,7 +66,7 @@ class AppConfig extends ChangeNotifier {
     if (value == null) {
       await p.remove(_kSeed);
     } else {
-      await p.setInt(_kSeed, value.value);
+      await p.setInt(_kSeed, value.toARGB32());
     }
   }
 

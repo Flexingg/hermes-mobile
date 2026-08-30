@@ -64,7 +64,7 @@ class SettingsPage extends StatelessWidget {
                     color: config.seedColor),
                 title: const Text('Custom accent active'),
                 subtitle: Text(
-                    '#${config.seedColor!.value.toRadixString(16).padLeft(8, '0')}'),
+                    '#${config.seedColor!.toARGB32().toRadixString(16).padLeft(8, '0')}'),
                 trailing: IconButton(
                   icon: const Icon(Icons.close),
                   onPressed: () => config.setSeedColor(null),

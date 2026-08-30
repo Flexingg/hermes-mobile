@@ -16,11 +16,13 @@ class _DashboardPageState extends State<DashboardPage> {
   @override
   void initState() {
     super.initState();
-    // Refresh periodically.
+    // Defer to after the first frame so notifyListeners doesn't fire during build.
     final state = context.read<AppState>();
-    state.loadStatus();
-    state.loadModels();
-    state.loadLogs();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      state.loadStatus();
+      state.loadModels();
+      state.loadLogs();
+    });
   }
 
   @override

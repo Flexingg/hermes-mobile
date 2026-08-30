@@ -80,7 +80,10 @@ class CronPage extends StatelessWidget {
                   },
                 ),
               ),
-              ButtonBar(
+              OverflowBar(
+                alignment: MainAxisAlignment.end,
+                overflowAlignment: OverflowBarAlignment.end,
+                spacing: 4,
                 children: [
                   TextButton.icon(
                     onPressed: () => _edit(context, state, j),

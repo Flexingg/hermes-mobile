@@ -100,7 +100,7 @@ class _NewChatSheetState extends State<NewChatSheet> {
     await state.refreshSessions();
     await state.openSession(session.id);
     await state.sendMessage(text);
-    if (!context.mounted) return;
+    if (!mounted) return;
     Navigator.of(context).push(
       MaterialPageRoute(builder: (_) => ChatThreadPage(sessionId: session.id)),
     );

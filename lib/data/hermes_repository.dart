@@ -355,7 +355,7 @@ class HermesRepository implements AppRepository {
         'name': s.name,
         'baseUrl': s.baseUrl,
         'isDefault': s.isDefault,
-        'accent': s.accentColor.value,
+        'accent': s.accentColor.toARGB32(),
         'bots': s.bots
             .map((b) => {
                   'id': b.id,

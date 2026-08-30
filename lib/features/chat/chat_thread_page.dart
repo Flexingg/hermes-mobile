@@ -212,16 +212,16 @@ class _ChatThreadPageState extends State<ChatThreadPage> {
         await state.toggleStarred(s.id);
         break;
       case 'share':
-        _share(context, state);
+        await _share(state);
         break;
       case 'delete':
         await state.deleteSession(s.id);
-        if (mounted) Navigator.of(context).pop();
+        if (context.mounted) Navigator.of(context).pop();
         break;
     }
   }
 
-  Future<void> _share(BuildContext context, AppState state) async {
+  Future<void> _share(AppState state) async {
     final msgs = state.messagesFor(widget.sessionId);
     final session = _session(state);
     final text = [
@@ -239,7 +239,7 @@ class _ChatThreadPageState extends State<ChatThreadPage> {
     try {
       await SharePlus.instance.share(ShareParams(text: text));
     } catch (e) {
-      if (context.mounted) {
+      if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(content: Text('Could not share: $e')),
         );

@@ -8,7 +8,7 @@ import '../config/app_config.dart';
 /// device credentials via [LocalAuthentication].
 class VaultGate extends StatefulWidget {
   final Widget child;
-  VaultGate({super.key, required this.child});
+  const VaultGate({super.key, required this.child});
 
   @override
   State<VaultGate> createState() => _VaultGateState();

@@ -35,6 +35,15 @@ class AppState extends ChangeNotifier {
 
   bool busy = false;
   String? error;
+  bool _disposed = false;
+
+  /// Guarded notify: never fire after dispose (avoids the `_dependents.isEmpty`
+  /// assertion when a subtree is being torn down).
+  @override
+  void notifyListeners() {
+    if (_disposed) return;
+    super.notifyListeners();
+  }
 
   AppState(this.config) {
     repo = config.demoMode
@@ -263,6 +272,7 @@ class AppState extends ChangeNotifier {
 
   @override
   void dispose() {
+    _disposed = true;
     _sub?.cancel();
     super.dispose();
   }

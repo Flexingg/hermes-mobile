@@ -28,7 +28,15 @@ class HermesMobileApp extends StatelessWidget {
     return MultiProvider(
       providers: [
         ChangeNotifierProvider.value(value: config),
-        ChangeNotifierProvider(create: (_) => AppState(config)..loadAll()),
+        ChangeNotifierProvider(
+          create: (_) {
+            final state = AppState(config);
+            // Load async data AFTER the first frame so `notifyListeners`
+            // never fires during the initial build (avoids deactivation crash).
+            WidgetsBinding.instance.addPostFrameCallback((_) => state.loadAll());
+            return state;
+          },
+        ),
       ],
       child: AppTheme.builder((lightDynamic, darkDynamic) {
         return Consumer<AppConfig>(builder: (context, cfg, _) {
@@ -46,7 +54,7 @@ class HermesMobileApp extends StatelessWidget {
               seedOverride: seed,
             ),
             themeMode: _resolve(cfg.themePreference),
-            home: VaultGate(child: const HomeShell()),
+            home: const VaultGate(child: HomeShell()),
           );
         });
       }),
