@@ -3,12 +3,15 @@ import 'dart:ui';
 import 'package:flutter/foundation.dart';
 import '../core/config/app_config.dart';
 import '../data/app_repository.dart';
-import '../data/demo_repository.dart';
 import '../data/hermes_repository.dart';
 import '../data/models.dart';
 
 /// Central reactive store driving the UI. Pages watch this notifier and call
 /// its methods; it owns the repository instance and streaming subscriptions.
+///
+/// There is no demo backend — [repo] always talks to a real Hermes server via
+/// [HermesRepository]. The app shows no data until the user connects to a
+/// server (see `connect()`).
 class AppState extends ChangeNotifier {
   final AppConfig config;
   late AppRepository repo;
@@ -37,6 +40,9 @@ class AppState extends ChangeNotifier {
   String? error;
   bool _disposed = false;
 
+  /// True once a real server has been reached successfully.
+  bool connected = false;
+
   /// Guarded notify: never fire after dispose (avoids the `_dependents.isEmpty`
   /// assertion when a subtree is being torn down).
   @override
@@ -45,14 +51,71 @@ class AppState extends ChangeNotifier {
     super.notifyListeners();
   }
 
-  AppState(this.config) {
-    repo = config.demoMode
-        ? DemoRepository()
-        : HermesRepository(baseUrl: _defaultBase, token: _defaultToken);
+  AppState(this.config);
+
+  /// Called after the first frame: if a server is already configured, connect
+  /// and load real data. Otherwise the app stays on the connect screen.
+  Future<void> init() async {
+    if (!config.hasServer) {
+      connected = false;
+      notifyListeners();
+      return;
+    }
+    final token = await config.serverToken;
+    repo = HermesRepository(
+      baseUrl: config.serverBaseUrl!,
+      token: token,
+    );
+    await _connect();
   }
 
-  static const _defaultBase = 'http://192.168.1.146:9119';
-  static const _defaultToken = ''; // set via UI / settings later
+  /// Validate + connect to a server, persisting it, then load real data.
+  Future<void> connect({
+    required String name,
+    required String baseUrl,
+    required String token,
+  }) async {
+    await config.setServer(name: name, baseUrl: baseUrl, token: token);
+    repo = HermesRepository(baseUrl: baseUrl, token: token);
+    await _connect();
+  }
+
+  Future<void> _connect() async {
+    busy = true;
+    error = null;
+    notifyListeners();
+    try {
+      final s = await repo.serverStatus();
+      status = s;
+      connected = true;
+      await loadAll();
+    } catch (e) {
+      connected = false;
+      error = e.toString();
+    } finally {
+      busy = false;
+      notifyListeners();
+    }
+  }
+
+  Future<void> disconnect() async {
+    await config.clearServer();
+    connected = false;
+    _sub?.cancel();
+    sessions = [];
+    _messages.clear();
+    cronJobs = [];
+    skills = [];
+    memory = [];
+    status = null;
+    logs = [];
+    models = [];
+    activities = [];
+    commands = [];
+    webhooks = [];
+    servers = [];
+    notifyListeners();
+  }
 
   List<ChatMessage> messagesFor(String sessionId) =>
       _messages[sessionId] ?? [];

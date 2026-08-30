@@ -2,13 +2,9 @@ import 'models.dart';
 
 /// The single source of truth interface the whole app talks to.
 ///
-/// Two implementations exist:
-///  - [DemoRepository]  — in-memory backend with realistic sample data and
-///    simulated latency/streaming, so the UI is fully browsable offline.
-///  - [HermesRepository] — real HTTP/WebSocket connector to a Hermes server.
-///
-/// The app is driven by this interface, so swapping between them is a config
-/// toggle (see AppConfig.demoMode).
+/// [HermesRepository] is the only implementation — it connects to a real
+/// Hermes bridge server over HTTP/WebSocket. The app requires a verified
+/// server connection before any data is shown.
 abstract class AppRepository {
   // ---- Servers & bots ------------------------------------------------
   Future<List<ServerProfile>> servers();

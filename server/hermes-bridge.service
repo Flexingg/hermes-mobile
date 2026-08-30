@@ -1,0 +1,16 @@
+[Unit]
+Description=Hermes Mobile bridge (fronts real Hermes for the Flutter app)
+After=network.target
+Wants=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/hermes/repos/hermes-mobile/server
+Environment=HERMES_HOME=/home/hermes/.hermes
+Environment=BRIDGE_TOKEN=REPLACE_WITH_TOKEN
+ExecStart=/home/hermes/.hermes/hermes-agent/venv/bin/python3 /home/hermes/repos/hermes-mobile/server/bridge.py
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target

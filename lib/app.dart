@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import 'core/config/app_config.dart';
+import 'core/connection/server_gate.dart';
 import 'core/security/vault_gate.dart';
 import 'core/theme/app_theme.dart';
 import 'features/shell/home_shell.dart';
@@ -31,9 +32,9 @@ class HermesMobileApp extends StatelessWidget {
         ChangeNotifierProvider(
           create: (_) {
             final state = AppState(config);
-            // Load async data AFTER the first frame so `notifyListeners`
-            // never fires during the initial build (avoids deactivation crash).
-            WidgetsBinding.instance.addPostFrameCallback((_) => state.loadAll());
+            // Connect + load AFTER the first frame so `notifyListeners` never
+            // fires during the initial build (avoids deactivation crash).
+            WidgetsBinding.instance.addPostFrameCallback((_) => state.init());
             return state;
           },
         ),
@@ -54,7 +55,9 @@ class HermesMobileApp extends StatelessWidget {
               seedOverride: seed,
             ),
             themeMode: _resolve(cfg.themePreference),
-            home: const VaultGate(child: HomeShell()),
+            home: const VaultGate(
+              child: ServerGate(child: HomeShell()),
+            ),
           );
         });
       }),

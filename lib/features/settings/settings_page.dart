@@ -88,15 +88,15 @@ class SettingsPage extends StatelessWidget {
                     MaterialPageRoute(builder: (_) => const ServersPage()),
                   ),
                 ),
-                SwitchListTile(
-                  secondary: const Icon(Icons.science_outlined),
-                  title: const Text('Demo mode'),
-                  subtitle: const Text('Use built-in sample data (no server)'),
-                  value: config.demoMode,
-                  onChanged: (v) async {
-                    await config.setDemoMode(v);
-                    // State re-creates its repository on next launch.
-                  },
+                ListTile(
+                  leading: Icon(Icons.link, color: scheme.primary),
+                  title: Text(config.serverName ?? 'Connected server'),
+                  subtitle: Text(config.serverBaseUrl ?? '',
+                      style: const TextStyle(fontFamily: 'monospace')),
+                  trailing: TextButton(
+                    onPressed: () => context.read<AppState>().disconnect(),
+                    child: const Text('Disconnect'),
+                  ),
                 ),
               ],
             ),

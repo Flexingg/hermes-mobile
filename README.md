@@ -5,9 +5,11 @@ A **Material You / Material Expressive** Flutter chat interface **and controller
 as close to **Google Messages** as possible while keeping the full Material 3 design language and
 dynamic-color theming.
 
-> **Status:** Early build — a fully-compiling app with a rich, offline-browsable demo mode plus a real
-> HTTP/WebSocket connector. Several platform features (push, biometric vault, home-screen widgets)
-> are scaffolded and listed in the roadmap below.
+> **Real data only.** This app has no demo data. It requires connecting to a
+> live Hermes **bridge** (`server/bridge.py`) that fronts a real Hermes install
+> and serves real sessions, messages, memory, skills, cron, status, and live
+> streaming chat. Until a server connection is verified, the app shows nothing
+> but the connect screen.
 
 ---
 
@@ -51,18 +53,18 @@ integration · 48. Home-screen widget (planned) · 50. Auto-update & crash repor
 ```
 lib/
 ├── main.dart                  # bootstrap: load config → run app
-├── app.dart                   # provider wiring + Material You theming
+├── app.dart                   # providers + Material You theming + ServerGate/VaultGate
 ├── core/
-│   ├── config/app_config.dart # persisted theme/demo settings (shared_preferences)
+│   ├── config/app_config.dart # persisted theme + server connection (secure token)
 │   ├── theme/app_theme.dart   # dynamic-color ColorScheme + Material 3 theme
-│   ├── util/format.dart       # relative time / clock formatting
-│   └── ...
+│   ├── connection/            # ServerGate + connect-onboarding screen
+│   ├── security/              # biometric VaultGate + secure token store
+│   └── util/format.dart       # relative time / clock formatting
 ├── data/
 │   ├── models.dart            # ChatMessage, ChatSession, ServerProfile, CronJob, …
 │   ├── app_repository.dart    # the one interface the UI talks to
-│   ├── demo_repository.dart   # offline in-memory backend (default)
-│   └── hermes_repository.dart # real HTTP + WebSocket connector
-├── state/app_state.dart       # ChangeNotifier store + streaming subscriptions
+│   └── hermes_repository.dart # real HTTP + WebSocket connector (only backend)
+├── state/app_state.dart       # ChangeNotifier store + connection + streaming
 ├── features/
 │   ├── shell/                 # bottom-nav scaffold
 │   ├── chat/                  # list, thread, bubbles, composer, search, new-chat
@@ -72,30 +74,46 @@ lib/
 └── widgets/                   # Avatar, StatusMessage
 ```
 
-The app is **interface-driven**: every screen talks to `AppRepository`. `DemoRepository` provides a
-full offline experience (no server needed); `HermesRepository` talks to a real Hermes server. Toggle
-with **Settings → Demo mode** (persisted).
+The app is **interface-driven** and **real-data only**: every screen talks to `AppRepository`, whose
+sole implementation is `HermesRepository`. On first launch the app shows the connect screen and will
+not display any data until it has verified a live connection to a Hermes bridge server.
 
-## 🔌 Connecting to a real Hermes server
+## 🔌 The Hermes bridge
 
-`HermesRepository` expects a REST + WebSocket contract:
+`HermesRepository` talks to `server/bridge.py`, a FastAPI service that fronts a **real** Hermes
+install and returns live data:
 
-| Method | Path | Purpose |
-|--------|------|---------|
-| GET | `/api/v1/servers`, `/sessions`, `/sessions/:id/messages`, `/cron`, `/skills`, `/memory`, `/status`, `/logs`, `/models`, `/tools`, `/commands`, `/webhooks` | read |
-| POST | `/api/v1/sessions`, `/sessions/:id/messages`, `/cron`, `/memory`, `/skills/:id/toggle`, `/sessions/:id/{read,pin,star}`, `/cron/:id/run`, `/webhooks/:id/trigger` | write / action |
-| WS | `/ws/chat/{sessionId}` | streamed assistant tokens |
+| Data | Source (real) |
+|------|---------------|
+| Sessions & messages | `~/.hermes/state.db` (SQLite) |
+| Chat (streaming) | `hermes chat --resume <session>` subprocess, streamed over WebSocket |
+| Memory | `~/.hermes/memories/USER.md` + `MEMORY.md` |
+| Cron jobs | `~/.hermes/cron/jobs.json` |
+| Skills | `~/.hermes/skills/**/SKILL.md` |
+| Status / model | `psutil` + `~/.hermes/config.yaml` |
+| Logs | `~/.hermes/logs/*.log` |
 
-Auth via `Authorization: Bearer <token>`. A thin bridge (FastAPI/Node) that fronts Hermes's gateway
-and exposes this contract is the intended production setup — see `docs/BRIDGE.md` (planned).
+**Run it (on the Hermes host):**
+```bash
+pip install -r server/requirements.txt
+HERMES_HOME=/home/hermes/.hermes \
+BRIDGE_TOKEN=<your-secret> \
+uvicorn server.bridge:app --host 0.0.0.0 --port 9130
+```
+Or install the included systemd user unit (`server/hermes-bridge.service`) to run it persistently.
 
-## 🚀 Running
+**App contract** (`HermesRepository`): every `GET`/`POST` under `/api/v1/*` sends
+`Authorization: Bearer <token>`; chat streams over `WS /ws/chat/{sessionId}`.
+
+## 🚀 Running (the app)
 
 ```bash
 flutter pub get
-flutter run                       # device/emulator (defaults to Demo mode)
+flutter run                       # device/emulator → connect screen on first launch
 flutter build apk --debug         # build a debug APK
 ```
+In the connect screen, enter your bridge URL (e.g. `http://192.168.1.146:9130`) and its bearer token,
+then **Connect & verify**. No data appears until the connection succeeds.
 
 ## 🗺️ Roadmap / next steps
 

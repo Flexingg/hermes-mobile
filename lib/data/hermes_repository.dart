@@ -6,8 +6,9 @@ import 'package:web_socket_channel/web_socket_channel.dart';
 import 'app_repository.dart';
 import 'models.dart';
 
-/// Real HTTP/WebSocket connector to a Hermes server (or a thin bridge exposing
-/// the same REST + WS contract). Point it at `baseUrl` with a bearer token.
+/// Real HTTP/WebSocket connector to a Hermes bridge server. The bridge fronts
+/// the Hermes gateway and exposes the REST + WS contract documented in the
+/// README. Point it at `baseUrl` with a bearer token.
 ///
 /// Expected REST contract (documented in README):
 ///   GET  /api/v1/servers, /sessions, /sessions/:id/messages, /cron, /skills,
@@ -15,7 +16,7 @@ import 'models.dart';
 ///   POST /api/v1/sessions, /sessions/:id/messages, /cron, /memory, /webhooks/:id/trigger
 ///   WS   /ws/chat/{sessionId}   -> streamed assistant tokens
 ///
-/// Set `AppConfig.demoMode = false` to use this implementation.
+/// This is the only backend — the app requires a verified connection.
 class HermesRepository implements AppRepository {
   final String baseUrl;
   final String? token;
