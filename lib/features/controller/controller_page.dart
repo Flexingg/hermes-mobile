@@ -7,7 +7,8 @@ import 'tools_page.dart';
 import 'webhooks_page.dart';
 
 /// Control hub: command palette trigger + tabbed management surfaces
-/// (Memory, Skills, Cron, Tools, Webhooks).
+/// (Memory, Skills, Cron, Tools, Webhooks). Uses a standard swipeable
+/// [TabBarView] with actions in the app bar.
 class ControllerPage extends StatefulWidget {
   const ControllerPage({super.key});
 
@@ -15,9 +16,39 @@ class ControllerPage extends StatefulWidget {
   State<ControllerPage> createState() => _ControllerPageState();
 }
 
-class _ControllerPageState extends State<ControllerPage> {
+class _ControllerPageState extends State<ControllerPage>
+    with SingleTickerProviderStateMixin {
+  late final TabController _tabController;
   int _tab = 0;
   final _memoryKey = GlobalKey<MemoryPageState>();
+
+  @override
+  void initState() {
+    super.initState();
+    _tabController = TabController(length: 5, vsync: this);
+    _tabController.addListener(() {
+      if (!_tabController.indexIsChanging && mounted) {
+        setState(() => _tab = _tabController.index);
+      }
+    });
+  }
+
+  @override
+  void dispose() {
+    _tabController.dispose();
+    super.dispose();
+  }
+
+  void _openPalette(BuildContext context) {
+    showModalBottomSheet<void>(
+      context: context,
+      isScrollControlled: true,
+      useSafeArea: true,
+      shape: const RoundedRectangleBorder(
+          borderRadius: BorderRadius.vertical(top: Radius.circular(28))),
+      builder: (_) => const CommandPalette(),
+    );
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -33,10 +64,24 @@ class _ControllerPageState extends State<ControllerPage> {
       appBar: AppBar(
         title: const Text('Control',
             style: TextStyle(fontWeight: FontWeight.w600)),
+        actions: [
+          if (_tab == 0)
+            IconButton(
+              tooltip: 'Add memory',
+              icon: const Icon(Icons.add),
+              onPressed: () =>
+                  _memoryKey.currentState?.showAddButton(context),
+            ),
+          IconButton(
+            tooltip: 'Commands & tools',
+            icon: const Icon(Icons.travel_explore_rounded),
+            onPressed: () => _openPalette(context),
+          ),
+        ],
         bottom: TabBar(
+          controller: _tabController,
           isScrollable: true,
           tabAlignment: TabAlignment.start,
-          onTap: (i) => setState(() => _tab = i),
           tabs: const [
             Tab(text: 'Memory'),
             Tab(text: 'Skills'),
@@ -46,34 +91,9 @@ class _ControllerPageState extends State<ControllerPage> {
           ],
         ),
       ),
-      body: IndexedStack(index: _tab, children: pages),
-      floatingActionButton: _tab == 0
-          ? FloatingActionButton.small(
-              heroTag: 'addmem',
-              tooltip: 'Add memory',
-              onPressed: () => _memoryKey.currentState?.showAddButton(context),
-              child: const Icon(Icons.add),
-            )
-          : null,
-      bottomNavigationBar: SafeArea(
-        child: Padding(
-          padding: const EdgeInsets.fromLTRB(12, 4, 12, 8),
-          child: FilledButton.tonalIcon(
-            style: FilledButton.styleFrom(
-              minimumSize: const Size.fromHeight(52),
-            ),
-            onPressed: () => showModalBottomSheet(
-              context: context,
-              isScrollControlled: true,
-              useSafeArea: true,
-              shape: const RoundedRectangleBorder(
-                  borderRadius: BorderRadius.vertical(top: Radius.circular(28))),
-              builder: (_) => const CommandPalette(),
-            ),
-            icon: const Icon(Icons.travel_explore_rounded),
-            label: const Text('Search commands & tools'),
-          ),
-        ),
+      body: TabBarView(
+        controller: _tabController,
+        children: pages,
       ),
     );
   }

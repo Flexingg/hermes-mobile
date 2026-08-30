@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:ui';
 import 'package:flutter/foundation.dart';
 import '../core/config/app_config.dart';
+import '../core/notifications/notifications.dart';
 import '../data/app_repository.dart';
 import '../data/hermes_repository.dart';
 import '../data/models.dart';
@@ -222,9 +223,30 @@ class AppState extends ChangeNotifier {
     }, onDone: () {
       sending = false;
       _sub = null;
+      // If notifications are enabled, ping when the assistant reply lands.
+      if (config.notificationsEnabled) {
+        final list = _messages[sid] ?? const [];
+        final last = list.isNotEmpty ? list.last : null;
+        if (last != null && last.isAssistant && last.text.trim().isNotEmpty) {
+          final title = _sessionTitleFor(sid);
+          NotificationsService.showReply(
+            title,
+            last.text.trim().length > 120
+                ? '${last.text.trim().substring(0, 120)}…'
+                : last.text.trim(),
+          );
+        }
+      }
       notifyListeners();
       refreshSessions();
     });
+  }
+
+  String _sessionTitleFor(String sid) {
+    for (final s in sessions) {
+      if (s.id == sid) return s.title;
+    }
+    return 'Hermes';
   }
 
   // ---- controller / dashboard loaders -------------------------------

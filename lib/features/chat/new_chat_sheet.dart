@@ -94,9 +94,13 @@ class _NewChatSheetState extends State<NewChatSheet> {
         .firstWhere((b) => b.id == _botId);
     final text = _controller.text.trim();
     if (text.isEmpty) return;
-    Navigator.of(context).pop(); // close sheet
 
-    // Show a blocking progress dialog while Hermes spins up a real session.
+    // Capture the navigator up front so we never touch a disposed context.
+    final nav = Navigator.of(context);
+
+    // Keep the sheet open and show a blocking progress dialog while Hermes
+    // spins up a real session. (Do NOT pop the sheet first — that disposes
+    // this State and made the dialog hang forever.)
     showDialog<void>(
       context: context,
       barrierDismissible: false,
@@ -120,16 +124,17 @@ class _NewChatSheetState extends State<NewChatSheet> {
       final session =
           await state.repo.startNewChat(name: bot.name, text: text);
       if (!mounted) return;
-      Navigator.of(context).pop(); // close progress dialog
+      nav.pop(); // close progress dialog
+      nav.pop(); // close the sheet
       await state.refreshSessions();
       await state.openSession(session.id);
       if (!mounted) return;
-      Navigator.of(context).push(
+      nav.push(
         MaterialPageRoute(builder: (_) => ChatThreadPage(sessionId: session.id)),
       );
     } catch (e) {
       if (!mounted) return;
-      Navigator.of(context).pop(); // close progress dialog
+      nav.pop(); // close progress dialog
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(content: Text('Could not start chat: $e')),
       );

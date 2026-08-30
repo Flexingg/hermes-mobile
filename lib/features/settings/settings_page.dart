@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import '../../core/config/app_config.dart';
+import '../../core/notifications/notifications.dart';
 import '../../core/theme/app_theme.dart';
 import '../../state/app_state.dart';
 import 'servers_page.dart';
@@ -111,9 +112,31 @@ class SettingsPage extends StatelessWidget {
                   secondary: const Icon(Icons.lock_outline),
                   title: const Text('Biometric vault'),
                   subtitle: const Text(
-                      'Lock the app with your fingerprint / face / PIN on launch'),
+                      'Off by default. Lock the app with fingerprint / face / PIN on launch'),
                   value: config.vaultEnabled,
                   onChanged: (v) async {
+                    if (v) {
+                      // Confirm so it's a deliberate opt-in, never an accident.
+                      final ok = await showDialog<bool>(
+                        context: context,
+                        builder: (ctx) => AlertDialog(
+                          title: const Text('Enable biometric lock?'),
+                          content: const Text(
+                              'The app will lock on launch and require your '
+                              'fingerprint, face, or device PIN to open. '
+                              'You can disable it anytime from the lock screen.'),
+                          actions: [
+                            TextButton(
+                                onPressed: () => Navigator.pop(ctx, false),
+                                child: const Text('Cancel')),
+                            FilledButton(
+                                onPressed: () => Navigator.pop(ctx, true),
+                                child: const Text('Enable')),
+                          ],
+                        ),
+                      );
+                      if (ok != true) return;
+                    }
                     await config.setVaultEnabled(v);
                     if (!context.mounted) return;
                     if (v) {
@@ -129,13 +152,34 @@ class SettingsPage extends StatelessWidget {
             ),
           ),
           const SizedBox(height: 20),
+          Text('Notifications', style: Theme.of(context).textTheme.titleMedium),
+          const SizedBox(height: 8),
+          Card(
+            child: Column(
+              children: [
+                SwitchListTile(
+                  secondary: const Icon(Icons.notifications_outlined),
+                  title: const Text('Notify on new replies'),
+                  subtitle: const Text(
+                      'Show a notification when Hermes finishes replying'),
+                  value: config.notificationsEnabled,
+                  onChanged: (v) {
+                    if (v) NotificationsService.requestPermission();
+                    config.setNotificationsEnabled(v);
+                  },
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(height: 20),
           Text('About', style: Theme.of(context).textTheme.titleMedium),
           const SizedBox(height: 8),
           Card(
             child: ListTile(
               leading: Icon(Icons.smart_toy_outlined, color: scheme.primary),
               title: const Text('Hermes Mobile'),
-              subtitle: const Text('Material You controller for Hermes Agent\nv1.0.0 · Android-optimized'),
+              subtitle: const Text(
+                  'Material You controller for Hermes Agent\nAndroid-optimized'),
               isThreeLine: true,
             ),
           ),

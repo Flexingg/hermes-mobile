@@ -12,6 +12,7 @@ class AppConfig extends ChangeNotifier {
   static const _kSeed = 'cfg_seed';
   static const _kDynamic = 'cfg_dynamic';
   static const _kVault = 'cfg_vault';
+  static const _kNotif = 'cfg_notif';
   static const _kServerName = 'cfg_server_name';
   static const _kServerBase = 'cfg_server_base';
   static const _kServerTokenRef = 'cfg_server_token_ref';
@@ -19,6 +20,7 @@ class AppConfig extends ChangeNotifier {
   late ThemePreference _themePreference;
   late bool _dynamicColor;
   bool _vaultEnabled = false;
+  bool _notificationsEnabled = false;
   Color? _seedColor;
 
   String? _serverName;
@@ -28,6 +30,7 @@ class AppConfig extends ChangeNotifier {
   bool get dynamicColor => _dynamicColor;
   ThemePreference get themePreference => _themePreference;
   bool get vaultEnabled => _vaultEnabled;
+  bool get notificationsEnabled => _notificationsEnabled;
   Color? get seedColor => _seedColor;
 
   String? get serverName => _serverName;
@@ -45,6 +48,7 @@ class AppConfig extends ChangeNotifier {
     _themePreference = ThemePreference.values[prefs.getInt(_kTheme) ?? 0];
     _dynamicColor = prefs.getBool(_kDynamic) ?? true;
     _vaultEnabled = prefs.getBool(_kVault) ?? false;
+    _notificationsEnabled = prefs.getBool(_kNotif) ?? false;
     _serverName = prefs.getString(_kServerName);
     _serverBaseUrl = prefs.getString(_kServerBase);
     _serverTokenRef = prefs.getString(_kServerTokenRef);
@@ -119,5 +123,12 @@ class AppConfig extends ChangeNotifier {
     notifyListeners();
     final p = await SharedPreferences.getInstance();
     await p.setBool(_kVault, value);
+  }
+
+  Future<void> setNotificationsEnabled(bool value) async {
+    _notificationsEnabled = value;
+    notifyListeners();
+    final p = await SharedPreferences.getInstance();
+    await p.setBool(_kNotif, value);
   }
 }
