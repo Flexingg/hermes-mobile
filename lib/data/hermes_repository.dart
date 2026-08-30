@@ -107,6 +107,16 @@ class HermesRepository implements AppRepository {
   }
 
   @override
+  Future<void> registerDevice(String token) async {
+    await _post('/api/v1/devices/register', {'token': token, 'platform': 'android'});
+  }
+
+  @override
+  Future<void> sendTestPush({String? title, String? message}) async {
+    await _post('/api/v1/devices/test', {'title': ?title, 'message': ?message});
+  }
+
+  @override
   Stream<ChatMessage> sendMessage(String sessionId, String text) async* {
     // 1) Persist the user message.
     await _post('/api/v1/sessions/$sessionId/messages', {'text': text});

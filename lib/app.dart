@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import 'core/config/app_config.dart';
 import 'core/connection/server_gate.dart';
+import 'core/navigation.dart';
 import 'core/security/vault_gate.dart';
 import 'core/theme/app_theme.dart';
 import 'features/shell/home_shell.dart';
@@ -44,8 +45,9 @@ class HermesMobileApp extends StatelessWidget {
           final useDynamic = cfg.dynamicColor;
           final seed = cfg.seedColor;
           return MaterialApp(
-            title: 'Hermes',
+            title: 'Mercury Messenger',
             debugShowCheckedModeBanner: false,
+            navigatorKey: appNavigatorKey,
             theme: AppTheme.light(
               dynamicScheme: useDynamic ? lightDynamic : null,
               seedOverride: seed,

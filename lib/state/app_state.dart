@@ -3,6 +3,7 @@ import 'dart:ui';
 import 'package:flutter/foundation.dart';
 import '../core/config/app_config.dart';
 import '../core/notifications/notifications.dart';
+import '../core/notifications/push.dart';
 import '../data/app_repository.dart';
 import '../data/hermes_repository.dart';
 import '../data/models.dart';
@@ -108,6 +109,13 @@ class AppState extends ChangeNotifier {
       return;
     }
     await loadAll(); // resilient: never throws, never disconnects
+    // Let the bridge push to this device once we're connected.
+    PushService.tokenSink = repo.registerDevice;
+    if (PushService.token != null) {
+      try {
+        await repo.registerDevice(PushService.token!);
+      } catch (_) {}
+    }
     busy = false;
     notifyListeners();
   }

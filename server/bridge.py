@@ -45,6 +45,11 @@ PROFILES_DIR = HERMES / "profiles"
 BRIDGE_TOKEN = os.environ.get("BRIDGE_TOKEN")
 # Absolute path to the `hermes` CLI (systemd services don't inherit ~/.local/bin).
 HERMES_BIN = os.environ.get("HERMES_BIN", "/home/hermes/.local/bin/hermes")
+# Firebase service-account JSON for FCM push (server-side). Optional.
+FCM_SERVICE_ACCOUNT = os.environ.get(
+    "FCM_SERVICE_ACCOUNT", "/home/hermes/.hermes/secrets/mercury-fcm-service-account.json"
+)
+DEVICE_TOKENS = HERMES / "mercury_devices.json"
 
 app = FastAPI(title="Hermes Mobile bridge", version="1.0")
 app.add_middleware(
@@ -124,6 +129,89 @@ def _hash_color(s: str) -> int:
     for ch in s:
         h = (h * 31 + ord(ch)) & 0xFFFFFF
     return h | 0xFF000000  # opaque ARGB for Flutter Color(int)
+
+
+# ---------------------------------------------------------------------------
+# FCM push (server-side). Optional: no-op gracefully if Firebase isn't set up.
+# ---------------------------------------------------------------------------
+def _load_tokens() -> list[str]:
+    try:
+        data = json.loads(DEVICE_TOKENS.read_text())
+        return list(dict.fromkeys(data.get("tokens", [])))
+    except Exception:
+        return []
+
+
+def _save_tokens(tokens: list[str]) -> None:
+    DEVICE_TOKENS.parent.mkdir(parents=True, exist_ok=True)
+    DEVICE_TOKENS.write_text(json.dumps({"tokens": list(dict.fromkeys(tokens))}))
+
+
+_messaging = None
+
+
+def _fcm():
+    """Lazily init firebase_admin messaging. Returns None if unavailable."""
+    global _messaging
+    if _messaging is not None:
+        return _messaging
+    if not os.path.exists(FCM_SERVICE_ACCOUNT):
+        return None
+    try:
+        import firebase_admin
+        from firebase_admin import credentials, messaging
+
+        if not firebase_admin._apps:
+            cred = credentials.Certificate(FCM_SERVICE_ACCOUNT)
+            firebase_admin.initialize_app(cred)
+        _messaging = messaging
+        return _messaging
+    except Exception:
+        return None
+
+
+def _send_push(title: str, body: str, data: dict | None = None) -> int:
+    """Send a push to every registered device token. Returns # messages sent."""
+    messaging = _fcm()
+    if messaging is None:
+        return 0
+    tokens = _load_tokens()
+    sent = 0
+    bad = []
+    for tok in tokens:
+        try:
+            msg = messaging.Message(
+                notification=messaging.Notification(title=title, body=body),
+                data={k: str(v) for k, v in (data or {}).items()},
+                token=tok,
+            )
+            messaging.send(msg)
+            sent += 1
+        except Exception:
+            bad.append(tok)  # e.g. invalid/expired token
+    if bad:
+        _save_tokens([t for t in tokens if t not in bad])
+    return sent
+
+
+def _send_chat_reply_push(session_id: str) -> None:
+    """After a chat reply finishes, read the last assistant text and push it."""
+    try:
+        con = _db()
+        row = con.execute(
+            """SELECT content FROM messages
+               WHERE session_id=? AND role='assistant' AND content IS NOT NULL
+                 AND content != '' ORDER BY timestamp DESC LIMIT 1""",
+            (session_id,),
+        ).fetchone()
+        con.close()
+        text = (row["content"] if row else "").strip()
+        if not text:
+            return
+        body = text[:200]
+        _send_push("Hermes replied", body, {"type": "chat", "session_id": session_id})
+    except Exception:
+        pass
 
 
 # ---------------------------------------------------------------------------
@@ -326,9 +414,34 @@ def _spawn_hermes(session_id: str, text: str) -> None:
                     _broadcast(session_id, {"event": "chunk", "delta": line + "\n"})
         proc.wait()
         _broadcast(session_id, {"event": "done"})
+        _send_chat_reply_push(session_id)
 
     t = threading.Thread(target=run, daemon=True)
     t.start()
+
+
+@app.post("/api/v1/devices/register")
+def register_device(body: dict):
+    """Register an FCM device token so the bridge can push to it."""
+    tok = (body.get("token") or "").strip()
+    platform = (body.get("platform") or "android")[:20]
+    if not tok:
+        raise HTTPException(status_code=400, detail="token required")
+    tokens = _load_tokens()
+    if tok not in tokens:
+        tokens.append(tok)
+        _save_tokens(tokens)
+    return {"ok": True, "registered": tok, "platform": platform}
+
+
+@app.post("/api/v1/devices/test")
+def test_push(body: dict | None = None):
+    """Send a test push to all registered devices. Returns count sent."""
+    body = body or {}
+    title = body.get("title") or "Mercury Messenger"
+    message = body.get("message") or "Push works ✅"
+    n = _send_push(title, message, {"type": "test"})
+    return {"ok": True, "sent": n}
 
 
 @app.websocket("/ws/chat/{session_id}")

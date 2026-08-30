@@ -1,7 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import '../../core/config/app_config.dart';
-import '../../core/notifications/notifications.dart';
+import '../../core/notifications/push.dart';
 import '../../core/theme/app_theme.dart';
 import '../../state/app_state.dart';
 import 'servers_page.dart';
@@ -248,13 +248,54 @@ class SettingsPage extends StatelessWidget {
               children: [
                 SwitchListTile(
                   secondary: const Icon(Icons.notifications_outlined),
-                  title: const Text('Notify on new replies'),
+                  title: const Text('Push notifications'),
                   subtitle: const Text(
-                      'Show a notification when Hermes finishes replying'),
+                      'Get a notification when Hermes replies (even when the '
+                      'app is closed). Requires permission.'),
                   value: config.notificationsEnabled,
-                  onChanged: (v) {
-                    if (v) NotificationsService.requestPermission();
-                    config.setNotificationsEnabled(v);
+                  onChanged: (v) async {
+                    if (v) {
+                      final granted = await PushService.requestPermission();
+                      if (!granted) {
+                        if (context.mounted) {
+                          ScaffoldMessenger.of(context).showSnackBar(
+                            const SnackBar(
+                                content: Text(
+                                    'Notification permission was not granted. '
+                                    'Enable it in system settings.')),
+                          );
+                        }
+                        return; // leave it off
+                      }
+                    }
+                    await config.setNotificationsEnabled(v);
+                  },
+                ),
+                const Divider(height: 1),
+                ListTile(
+                  enabled: config.notificationsEnabled,
+                  leading: const Icon(Icons.send_outlined),
+                  title: const Text('Send test push'),
+                  subtitle: const Text('Fire a test notification to this device'),
+                  trailing: const Icon(Icons.chevron_right),
+                  onTap: () async {
+                    final st = context.read<AppState>();
+                    try {
+                      await st.repo.sendTestPush(
+                          title: 'Mercury Messenger',
+                          message: 'Push works ✅ from your Hermes bridge');
+                      if (context.mounted) {
+                        ScaffoldMessenger.of(context).showSnackBar(
+                          const SnackBar(content: Text('Test push sent.')),
+                        );
+                      }
+                    } catch (e) {
+                      if (context.mounted) {
+                        ScaffoldMessenger.of(context).showSnackBar(
+                          SnackBar(content: Text('Test push failed: $e')),
+                        );
+                      }
+                    }
                   },
                 ),
               ],

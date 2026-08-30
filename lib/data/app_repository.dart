@@ -30,6 +30,11 @@ abstract class AppRepository {
   Future<void> deleteSession(String sessionId);
   Future<List<ChatSession>> searchSessions(String query);
 
+  // ---- Push notifications -------------------------------------------
+  /// Registers this device's FCM token with the bridge so it can push to us.
+  Future<void> registerDevice(String token);
+  Future<void> sendTestPush({String? title, String? message});
+
   // ---- Cron jobs -----------------------------------------------------
   Future<List<CronJob>> cronJobs();
   Future<CronJob> createCronJob(CronJob job);

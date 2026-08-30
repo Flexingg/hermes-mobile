@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "428687289454",
+    "project_id": "mercury-messenger-ee8e7",
+    "storage_bucket": "mercury-messenger-ee8e7.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:428687289454:android:54005762023ca32f400a7f",
+        "android_client_info": {
+          "package_name": "com.randallengineering.hermes"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyBNb5iMkdR-74r1fem5xBfbWiXMslVtnms"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
