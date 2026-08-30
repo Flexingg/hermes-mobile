@@ -71,6 +71,7 @@ class _VaultGateState extends State<VaultGate> {
       supported: _supported,
       error: _error,
       onUnlock: _unlock,
+      onReset: () => context.read<AppConfig>().setVaultEnabled(false),
     );
   }
 }
@@ -79,10 +80,12 @@ class _LockScreen extends StatelessWidget {
   final bool supported;
   final String? error;
   final VoidCallback onUnlock;
+  final VoidCallback onReset;
   const _LockScreen({
     required this.supported,
     required this.error,
     required this.onUnlock,
+    required this.onReset,
   });
 
   @override
@@ -111,7 +114,7 @@ class _LockScreen extends StatelessWidget {
               Text(
                 supported
                     ? 'Unlock with your fingerprint, face, or device PIN.'
-                    : 'Biometric auth isn\'t available on this device.',
+                    : 'Use your device PIN / password to unlock.',
                 textAlign: TextAlign.center,
                 style: Theme.of(context)
                     .textTheme
@@ -126,9 +129,16 @@ class _LockScreen extends StatelessWidget {
               ],
               const SizedBox(height: 24),
               FilledButton.icon(
-                onPressed: supported ? onUnlock : null,
+                // Always allow an attempt — device credentials work even
+                // without biometrics.
+                onPressed: onUnlock,
                 icon: const Icon(Icons.fingerprint),
                 label: const Text('Unlock'),
+              ),
+              const SizedBox(height: 12),
+              TextButton(
+                onPressed: onReset,
+                child: const Text('Having trouble? Disable biometric lock'),
               ),
             ],
           ),
