@@ -241,6 +241,20 @@ class SettingsPage extends StatelessWidget {
             ),
           ),
           const SizedBox(height: 20),
+          Text('Chat', style: Theme.of(context).textTheme.titleMedium),
+          const SizedBox(height: 8),
+          Card(
+            child: SwitchListTile(
+              secondary: const Icon(Icons.code_rounded),
+              title: const Text('Show technical details'),
+              subtitle: const Text(
+                  'Always display tool calls & thinking in conversations. '
+                  'Off: they collapse until you tap one.'),
+              value: config.showTechnical,
+              onChanged: (v) => config.setShowTechnical(v),
+            ),
+          ),
+          const SizedBox(height: 20),
           Text('Notifications', style: Theme.of(context).textTheme.titleMedium),
           const SizedBox(height: 8),
           Card(

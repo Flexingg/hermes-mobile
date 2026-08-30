@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import '../../core/util/format.dart';
+import '../../data/models.dart';
 import '../../state/app_state.dart';
 import '../../widgets/common.dart';
 import '../settings/servers_page.dart';
@@ -65,6 +66,7 @@ class ChatListPage extends StatelessWidget {
                   final s = state.sessions[i];
                   return _SessionTile(
                     session: s,
+                    state: state,
                     onTap: () async {
                       await state.openSession(s.id);
                       if (!context.mounted) return;
@@ -82,26 +84,64 @@ class ChatListPage extends StatelessWidget {
 }
 
 class _SessionTile extends StatelessWidget {
-  final dynamic session; // ChatSession
+  final ChatSession session;
+  final AppState state;
   final VoidCallback onTap;
 
-  const _SessionTile({required this.session, required this.onTap});
+  const _SessionTile({
+    required this.session,
+    required this.state,
+    required this.onTap,
+  });
+
+  /// Line 1 — who you're chatting with.
+  String get _agentName {
+    for (final server in state.servers) {
+      for (final b in server.bots) {
+        if (b.id == session.profileId) return b.name;
+      }
+    }
+    final t = session.title;
+    if (t.startsWith('@')) return t;
+    return 'Hermes';
+  }
+
+  /// Line 2 — the subject of the conversation.
+  String get _subject {
+    final agent = _agentName;
+    final t = session.title;
+    if (t.isEmpty || t.toLowerCase() == agent.toLowerCase()) {
+      return session.lastPreview;
+    }
+    return t;
+  }
+
+  String? get _emoji {
+    final a = _agentName.toLowerCase();
+    if (a.contains('patrick')) return '💪';
+    if (a.contains('homie') || a.contains('home')) return '🏠';
+    if (a.contains('boba')) return '🤖';
+    if (a.contains('financ')) return '💰';
+    if (a.contains('hermes')) return '🧠';
+    return null;
+  }
 
   @override
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
-    final s = session;
-    final unread = s.unreadCount > 0;
+    final unread = session.unreadCount > 0;
+    final agent = _agentName;
+    final subject = _subject;
     final nameStyle = Theme.of(context).textTheme.bodyLarge?.copyWith(
-          fontWeight: unread ? FontWeight.w600 : FontWeight.w400,
+          fontWeight: unread ? FontWeight.w600 : FontWeight.w500,
         );
-    final previewStyle = Theme.of(context).textTheme.bodyMedium?.copyWith(
+    final subjectStyle = Theme.of(context).textTheme.bodyMedium?.copyWith(
           color: unread ? scheme.onSurface : scheme.onSurfaceVariant,
           fontWeight: unread ? FontWeight.w600 : FontWeight.w400,
         );
 
     return Dismissible(
-      key: ValueKey(s.id),
+      key: ValueKey(session.id),
       direction: DismissDirection.endToStart,
       background: Container(
         alignment: Alignment.centerRight,
@@ -109,25 +149,24 @@ class _SessionTile extends StatelessWidget {
         color: scheme.errorContainer,
         child: Icon(Icons.delete_outline, color: scheme.onErrorContainer),
       ),
-      onDismissed: (_) =>
-          context.read<AppState>().deleteSession(s.id as String),
+      onDismissed: (_) => context.read<AppState>().deleteSession(session.id),
       child: ListTile(
         onTap: onTap,
         leading: Avatar(
-          label: s.title as String,
-          color: s.avatarColor as Color,
-          emoji: _emojiFor(s.title as String),
+          label: agent,
+          color: session.avatarColor,
+          emoji: _emoji,
           hasUnread: unread,
         ),
         title: Row(
           children: [
             Expanded(
-              child: Text(s.title as String,
+              child: Text(agent,
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
                   style: nameStyle),
             ),
-            Text(formatRelativeTime(s.lastTimestamp as DateTime),
+            Text(formatRelativeTime(session.lastTimestamp),
                 style: Theme.of(context)
                     .textTheme
                     .labelSmall
@@ -136,28 +175,23 @@ class _SessionTile extends StatelessWidget {
         ),
         subtitle: Row(
           children: [
-            if (s.starred as bool) ...[
+            if (session.starred) ...[
               Icon(Icons.star, size: 16, color: scheme.tertiary),
               const SizedBox(width: 4),
             ],
+            if (session.pinned) ...[
+              Icon(Icons.push_pin, size: 14, color: scheme.onSurfaceVariant),
+              const SizedBox(width: 4),
+            ],
             Expanded(
-              child: Text(s.lastPreview as String,
+              child: Text(subject,
                   maxLines: 2,
                   overflow: TextOverflow.ellipsis,
-                  style: previewStyle),
+                  style: subjectStyle),
             ),
           ],
         ),
       ),
     );
-  }
-
-  String? _emojiFor(String title) {
-    final t = title.toLowerCase();
-    if (t.contains('patrick')) return '💪';
-    if (t.contains('homie') || t.contains('home')) return '🏠';
-    if (t.contains('financ')) return '💰';
-    if (t.contains('hermes')) return '🧠';
-    return null;
   }
 }

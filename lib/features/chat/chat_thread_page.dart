@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
 import 'package:share_plus/share_plus.dart';
 import '../../data/models.dart';
@@ -131,15 +132,17 @@ class _ChatThreadPageState extends State<ChatThreadPage> {
                     itemCount: messages.length,
                     itemBuilder: (context, i) {
                       final m = messages[i];
-                      if (m.isAssistant && m.id.startsWith('u-') == false) {
-                        return MessageBubble(
-                          message: m,
-                          avatarColor: session?.avatarColor ?? scheme.primary,
-                          avatarEmoji:
-                              session == null ? null : _emojiFor(session.title),
-                        );
-                      }
-                      return MessageBubble(message: m);
+                      final bubble = (m.isAssistant && m.id.startsWith('u-') == false)
+                          ? MessageBubble(
+                              message: m,
+                              avatarColor:
+                                  session?.avatarColor ?? scheme.primary,
+                              avatarEmoji: session == null
+                                  ? null
+                                  : _emojiFor(session.title),
+                            )
+                          : MessageBubble(message: m);
+                      return _InteractiveBubble(message: m, child: bubble);
                     },
                   ),
           ),
@@ -305,5 +308,95 @@ class _ChatThreadPageState extends State<ChatThreadPage> {
     if (t.contains('financ')) return '💰';
     if (t.contains('hermes')) return '🧠';
     return null;
+  }
+}
+
+/// Wraps a message bubble with hold + swipe actions.
+///  - Long-press: context menu (copy / share).
+///  - Swipe left: copy the message.
+class _InteractiveBubble extends StatefulWidget {
+  final ChatMessage message;
+  final Widget child;
+  const _InteractiveBubble({required this.message, required this.child});
+
+  @override
+  State<_InteractiveBubble> createState() => _InteractiveBubbleState();
+}
+
+class _InteractiveBubbleState extends State<_InteractiveBubble> {
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    return Dismissible(
+      key: ValueKey('msg-${widget.message.id}-'
+          '${widget.message.timestamp.millisecondsSinceEpoch}'),
+      direction: DismissDirection.endToStart,
+      background: Container(
+        alignment: Alignment.centerRight,
+        padding: const EdgeInsets.only(right: 24),
+        color: scheme.secondaryContainer,
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(Icons.copy_rounded, size: 18, color: scheme.onSecondaryContainer),
+            const SizedBox(width: 6),
+            Text('Copy', style: TextStyle(color: scheme.onSecondaryContainer)),
+          ],
+        ),
+      ),
+      confirmDismiss: (_) async {
+        await _copy();
+        return false; // snap back — swipe is an action, not a delete
+      },
+      child: GestureDetector(
+        onLongPress: _showMenu,
+        child: widget.child,
+      ),
+    );
+  }
+
+  Future<void> _copy() async {
+    final text = widget.message.text;
+    if (text.isEmpty) return;
+    await Clipboard.setData(ClipboardData(text: text));
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(content: Text('Copied to clipboard'), duration: Duration(seconds: 1)),
+    );
+  }
+
+  void _share() {
+    SharePlus.instance.share(ShareParams(text: widget.message.text));
+  }
+
+  Future<void> _showMenu() async {
+    final action = await showModalBottomSheet<String>(
+      context: context,
+      builder: (context) => SafeArea(
+        child: Wrap(
+          children: [
+            ListTile(
+              leading: const Icon(Icons.copy_rounded),
+              title: const Text('Copy message'),
+              onTap: () => Navigator.pop(context, 'copy'),
+            ),
+            ListTile(
+              leading: const Icon(Icons.share_outlined),
+              title: const Text('Share message'),
+              onTap: () => Navigator.pop(context, 'share'),
+            ),
+          ],
+        ),
+      ),
+    );
+    if (action == null || !mounted) return;
+    switch (action) {
+      case 'copy':
+        await _copy();
+        break;
+      case 'share':
+        _share();
+        break;
+    }
   }
 }

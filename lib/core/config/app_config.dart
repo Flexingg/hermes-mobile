@@ -16,6 +16,7 @@ class AppConfig extends ChangeNotifier {
   static const _kDensity = 'cfg_density';
   static const _kRadius = 'cfg_radius';
   static const _kBubble = 'cfg_bubble';
+  static const _kTech = 'cfg_tech';
   static const _kServerName = 'cfg_server_name';
   static const _kServerBase = 'cfg_server_base';
   static const _kServerTokenRef = 'cfg_server_token_ref';
@@ -28,6 +29,7 @@ class AppConfig extends ChangeNotifier {
   UiDensity _uiDensity = UiDensity.comfortable;
   CornerRadius _cornerRadius = CornerRadius.standard;
   BubbleStyle _bubbleStyle = BubbleStyle.green;
+  bool _showTechnical = false;
 
   String? _serverName;
   String? _serverBaseUrl;
@@ -41,6 +43,7 @@ class AppConfig extends ChangeNotifier {
   UiDensity get uiDensity => _uiDensity;
   CornerRadius get cornerRadius => _cornerRadius;
   BubbleStyle get bubbleStyle => _bubbleStyle;
+  bool get showTechnical => _showTechnical;
 
   String? get serverName => _serverName;
   String? get serverBaseUrl => _serverBaseUrl;
@@ -61,6 +64,7 @@ class AppConfig extends ChangeNotifier {
     _uiDensity = UiDensity.values[prefs.getInt(_kDensity) ?? 0];
     _cornerRadius = CornerRadius.values[prefs.getInt(_kRadius) ?? 0];
     _bubbleStyle = BubbleStyle.values[prefs.getInt(_kBubble) ?? 1];
+    _showTechnical = prefs.getBool(_kTech) ?? false;
     _serverName = prefs.getString(_kServerName);
     _serverBaseUrl = prefs.getString(_kServerBase);
     _serverTokenRef = prefs.getString(_kServerTokenRef);
@@ -163,6 +167,13 @@ class AppConfig extends ChangeNotifier {
     notifyListeners();
     final p = await SharedPreferences.getInstance();
     await p.setInt(_kBubble, value.index);
+  }
+
+  Future<void> setShowTechnical(bool value) async {
+    _showTechnical = value;
+    notifyListeners();
+    final p = await SharedPreferences.getInstance();
+    await p.setBool(_kTech, value);
   }
 
   /// Reset appearance + UI preferences to their defaults.

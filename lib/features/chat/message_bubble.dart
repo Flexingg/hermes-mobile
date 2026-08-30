@@ -1,5 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_markdown/flutter_markdown.dart';
+import 'package:provider/provider.dart';
+import '../../core/config/app_config.dart';
 import '../../core/theme/app_theme.dart';
 import '../../core/util/format.dart';
 import '../../data/models.dart';
@@ -246,32 +248,55 @@ class _TypingIndicatorState extends State<_TypingIndicator>
   }
 }
 
-class _ToolBubble extends StatelessWidget {
+class _ToolBubble extends StatefulWidget {
   final ChatMessage message;
   const _ToolBubble({required this.message});
 
   @override
+  State<_ToolBubble> createState() => _ToolBubbleState();
+}
+
+class _ToolBubbleState extends State<_ToolBubble> {
+  bool _expanded = false;
+
+  @override
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
+    final config = context.watch<AppConfig>();
+    final showAll = config.showTechnical;
+    final visible = showAll || _expanded;
+    final toolName = widget.message.toolName ?? 'tool';
+
     return Padding(
       padding: const EdgeInsets.symmetric(vertical: 2, horizontal: 40),
-      child: Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Icon(Icons.handyman_outlined,
-              size: 15, color: scheme.tertiary),
-          const SizedBox(width: 6),
-          Flexible(
-            child: Text(
-              message.text,
-              style: TextStyle(
-                fontSize: 12,
-                fontFamily: 'monospace',
-                color: scheme.onSurfaceVariant,
+      child: InkWell(
+        onTap: () => setState(() => _expanded = !_expanded),
+        borderRadius: BorderRadius.circular(12),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(Icons.handyman_outlined, size: 15, color: scheme.tertiary),
+            const SizedBox(width: 6),
+            Flexible(
+              child: Text(
+                visible ? widget.message.text : toolName,
+                maxLines: visible ? null : 1,
+                overflow: visible ? null : TextOverflow.ellipsis,
+                style: TextStyle(
+                  fontSize: 12,
+                  fontFamily: 'monospace',
+                  color: scheme.onSurfaceVariant,
+                ),
               ),
             ),
-          ),
-        ],
+            const SizedBox(width: 6),
+            Icon(
+              visible ? Icons.expand_less : Icons.expand_more,
+              size: 15,
+              color: scheme.onSurfaceVariant,
+            ),
+          ],
+        ),
       ),
     );
   }
