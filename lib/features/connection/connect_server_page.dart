@@ -13,7 +13,7 @@ class ConnectServerPage extends StatefulWidget {
 
 class _ConnectServerPageState extends State<ConnectServerPage> {
   final _name = TextEditingController(text: 'Hermes PC');
-  final _url = TextEditingController(text: 'http://192.168.1.146:9130');
+  final _url = TextEditingController(text: 'http://100.67.34.4:9130');
   final _token = TextEditingController();
 
   @override
