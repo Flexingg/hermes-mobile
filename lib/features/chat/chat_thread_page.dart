@@ -10,7 +10,21 @@ import 'message_bubble.dart';
 /// A full chat thread, Google-Messages style.
 class ChatThreadPage extends StatefulWidget {
   final String sessionId;
-  const ChatThreadPage({super.key, required this.sessionId});
+
+  /// When true, this thread was opened optimistically for a brand-new chat:
+  /// [pendingText]/[name] show immediately and the real session is created in
+  /// the background, swapping into view via `AppState.newChatTargetId`.
+  final bool isNewChat;
+  final String? name;
+  final String? pendingText;
+
+  const ChatThreadPage({
+    super.key,
+    required this.sessionId,
+    this.isNewChat = false,
+    this.name,
+    this.pendingText,
+  });
 
   @override
   State<ChatThreadPage> createState() => _ChatThreadPageState();
@@ -19,10 +33,23 @@ class ChatThreadPage extends StatefulWidget {
 class _ChatThreadPageState extends State<ChatThreadPage> {
   final _scroll = ScrollController();
 
+  String _effectiveId(AppState state) => widget.isNewChat
+      ? (state.newChatTargetId ?? widget.sessionId)
+      : widget.sessionId;
+
   @override
   void initState() {
     super.initState();
-    WidgetsBinding.instance.addPostFrameCallback((_) => _jumpToBottom());
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _jumpToBottom();
+      if (widget.isNewChat) {
+        context.read<AppState>().createNewChat(
+              name: widget.name ?? 'Hermes',
+              text: widget.pendingText ?? '',
+              pendingId: widget.sessionId,
+            );
+      }
+    });
   }
 
   @override
@@ -38,8 +65,9 @@ class _ChatThreadPageState extends State<ChatThreadPage> {
   }
 
   ChatSession? _session(AppState state) {
+    final id = _effectiveId(state);
     for (final s in state.sessions) {
-      if (s.id == widget.sessionId) return s;
+      if (s.id == id) return s;
     }
     return null;
   }
@@ -49,7 +77,7 @@ class _ChatThreadPageState extends State<ChatThreadPage> {
     final state = context.watch<AppState>();
     final session = _session(state);
     final scheme = Theme.of(context).colorScheme;
-    final messages = state.messagesFor(widget.sessionId);
+    final messages = state.messagesFor(_effectiveId(state));
 
     return Scaffold(
       appBar: AppBar(
@@ -71,7 +99,11 @@ class _ChatThreadPageState extends State<ChatThreadPage> {
             Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Text(session?.title ?? 'Chat',
+                Text(
+                    session?.title ??
+                        (widget.isNewChat
+                            ? (widget.name ?? 'New chat')
+                            : 'Chat'),
                     style: const TextStyle(
                         fontSize: 17, fontWeight: FontWeight.w600)),
                 Text(_subtitle(state, session),
@@ -111,8 +143,27 @@ class _ChatThreadPageState extends State<ChatThreadPage> {
                     },
                   ),
           ),
-          if (state.sending) _sendingBar(context, state),
-          MessageComposer(),
+          if (widget.isNewChat && state.creatingChat)
+            _startingBar(context, state)
+          else if (state.sending)
+            _sendingBar(context, state),
+          MessageComposer(enabled: !(widget.isNewChat && state.creatingChat)),
+        ],
+      ),
+    );
+  }
+
+  Widget _startingBar(BuildContext context, AppState state) {
+    final scheme = Theme.of(context).colorScheme;
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
+      child: Row(
+        children: [
+          const SizedBox(
+              width: 14, height: 14, child: CircularProgressIndicator(strokeWidth: 2)),
+          const SizedBox(width: 10),
+          Text('Hermes is starting…',
+              style: TextStyle(fontSize: 12, color: scheme.onSurfaceVariant)),
         ],
       ),
     );
@@ -120,8 +171,8 @@ class _ChatThreadPageState extends State<ChatThreadPage> {
 
   Widget _sendingBar(BuildContext context, AppState state) {
     final scheme = Theme.of(context).colorScheme;
-    final last = state.messagesFor(widget.sessionId).isNotEmpty
-        ? state.messagesFor(widget.sessionId).last
+    final last = state.messagesFor(_effectiveId(state)).isNotEmpty
+        ? state.messagesFor(_effectiveId(state)).last
         : null;
     final toolActive = last != null && last.role == ChatMessageRole.tool;
     return Padding(
@@ -142,8 +193,8 @@ class _ChatThreadPageState extends State<ChatThreadPage> {
   }
 
   String _subtitle(AppState state, ChatSession? session) {
-    final last = state.messagesFor(widget.sessionId).isNotEmpty
-        ? state.messagesFor(widget.sessionId).last
+    final last = state.messagesFor(_effectiveId(state)).isNotEmpty
+        ? state.messagesFor(_effectiveId(state)).last
         : null;
     if (last != null) {
       if (last.isAssistant && last.text.isNotEmpty && last.status.name == 'streaming') {
@@ -222,7 +273,7 @@ class _ChatThreadPageState extends State<ChatThreadPage> {
   }
 
   Future<void> _share(AppState state) async {
-    final msgs = state.messagesFor(widget.sessionId);
+    final msgs = state.messagesFor(_effectiveId(state));
     final session = _session(state);
     final text = [
       'Hermes conversation: ${session?.title ?? ''}',

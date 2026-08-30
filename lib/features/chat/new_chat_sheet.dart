@@ -87,7 +87,7 @@ class _NewChatSheetState extends State<NewChatSheet> {
     );
   }
 
-  Future<void> _start() async {
+  void _start() {
     final state = context.read<AppState>();
     final bot = state.servers
         .expand((s) => s.bots)
@@ -95,49 +95,20 @@ class _NewChatSheetState extends State<NewChatSheet> {
     final text = _controller.text.trim();
     if (text.isEmpty) return;
 
-    // Capture the navigator up front so we never touch a disposed context.
+    // Jump straight into the messages UI. The real session is created in the
+    // background by ChatThreadPage (isNewChat) and swaps in when ready.
     final nav = Navigator.of(context);
-
-    // Keep the sheet open and show a blocking progress dialog while Hermes
-    // spins up a real session. (Do NOT pop the sheet first — that disposes
-    // this State and made the dialog hang forever.)
-    showDialog<void>(
-      context: context,
-      barrierDismissible: false,
-      builder: (_) => const Center(
-        child: Card(
-          child: Padding(
-            padding: EdgeInsets.all(20),
-            child: Row(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                CircularProgressIndicator(),
-                SizedBox(width: 16),
-                Text('Starting conversation…'),
-              ],
-            ),
-          ),
+    final pendingId = 'new_${DateTime.now().millisecondsSinceEpoch}';
+    nav.pop(); // close the sheet
+    nav.push(
+      MaterialPageRoute(
+        builder: (_) => ChatThreadPage(
+          sessionId: pendingId,
+          isNewChat: true,
+          name: bot.name,
+          pendingText: text,
         ),
       ),
     );
-    try {
-      final session =
-          await state.repo.startNewChat(name: bot.name, text: text);
-      if (!mounted) return;
-      nav.pop(); // close progress dialog
-      nav.pop(); // close the sheet
-      await state.refreshSessions();
-      await state.openSession(session.id);
-      if (!mounted) return;
-      nav.push(
-        MaterialPageRoute(builder: (_) => ChatThreadPage(sessionId: session.id)),
-      );
-    } catch (e) {
-      if (!mounted) return;
-      nav.pop(); // close progress dialog
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Could not start chat: $e')),
-      );
-    }
   }
 }

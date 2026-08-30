@@ -4,7 +4,8 @@ import '../../state/app_state.dart';
 
 /// Google-Messages-style message composer: attach · text · voice/send.
 class MessageComposer extends StatefulWidget {
-  const MessageComposer({super.key});
+  final bool enabled;
+  const MessageComposer({super.key, this.enabled = true});
 
   @override
   State<MessageComposer> createState() => _MessageComposerState();
@@ -57,16 +58,17 @@ class _MessageComposerState extends State<MessageComposer> {
                 child: TextField(
                   controller: _controller,
                   focusNode: _focus,
+                  enabled: widget.enabled,
                   minLines: 1,
                   maxLines: 6,
                   textInputAction: TextInputAction.newline,
                   onChanged: (_) => setState(() {}),
                   onSubmitted: (_) {
-                    if (state.sending) return;
+                    if (!widget.enabled || state.sending) return;
                     _send();
                   },
-                  decoration: const InputDecoration(
-                    hintText: 'Message',
+                  decoration: InputDecoration(
+                    hintText: widget.enabled ? 'Message' : 'Starting…',
                     border: InputBorder.none,
                   ),
                 ),
@@ -81,7 +83,7 @@ class _MessageComposerState extends State<MessageComposer> {
                         height: 18,
                         child: CircularProgressIndicator(strokeWidth: 2))
                     : const Icon(Icons.send_rounded),
-                onPressed: state.sending ? null : _send,
+                onPressed: !widget.enabled || state.sending ? null : _send,
               )
             else
               IconButton(

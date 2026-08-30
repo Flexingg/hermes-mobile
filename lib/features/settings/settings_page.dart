@@ -53,61 +53,51 @@ class SettingsPage extends StatelessWidget {
                   },
                 ),
                 const Divider(height: 1),
-                ListTile(
-                  leading: const Icon(Icons.brightness_6_outlined),
-                  title: const Text('Theme mode'),
-                  trailing: SegmentedButton<ThemePreference>(
-                    segments: const [
-                      ButtonSegment(value: ThemePreference.system, label: Text('Auto')),
-                      ButtonSegment(value: ThemePreference.light, icon: Icon(Icons.light_mode_outlined)),
-                      ButtonSegment(value: ThemePreference.dark, icon: Icon(Icons.dark_mode_outlined)),
-                    ],
-                    selected: {config.themePreference},
-                    onSelectionChanged: (s) => config.setThemePreference(s.first),
-                  ),
+                _SegRow<ThemePreference>(
+                  icon: Icons.brightness_6_outlined,
+                  label: 'Theme mode',
+                  selected: config.themePreference,
+                  onChanged: config.setThemePreference,
+                  segments: const [
+                    ButtonSegment(value: ThemePreference.system, label: Text('Auto')),
+                    ButtonSegment(value: ThemePreference.light, label: Text('Light'), icon: Icon(Icons.light_mode_outlined)),
+                    ButtonSegment(value: ThemePreference.dark, label: Text('Dark'), icon: Icon(Icons.dark_mode_outlined)),
+                  ],
                 ),
                 const Divider(height: 1),
-                ListTile(
-                  leading: const Icon(Icons.space_dashboard_outlined),
-                  title: const Text('Density'),
-                  trailing: SegmentedButton<UiDensity>(
-                    segments: const [
-                      ButtonSegment(value: UiDensity.comfortable, label: Text('Comfy')),
-                      ButtonSegment(value: UiDensity.compact, label: Text('Compact')),
-                    ],
-                    selected: {config.uiDensity},
-                    onSelectionChanged: (s) => config.setUiDensity(s.first),
-                  ),
+                _SegRow<UiDensity>(
+                  icon: Icons.space_dashboard_outlined,
+                  label: 'Density',
+                  selected: config.uiDensity,
+                  onChanged: config.setUiDensity,
+                  segments: const [
+                    ButtonSegment(value: UiDensity.comfortable, label: Text('Comfy')),
+                    ButtonSegment(value: UiDensity.compact, label: Text('Compact')),
+                  ],
                 ),
                 const Divider(height: 1),
-                ListTile(
-                  leading: const Icon(Icons.rounded_corner),
-                  title: const Text('Corner radius'),
-                  trailing: SegmentedButton<CornerRadius>(
-                    style: ButtonStyle(visualDensity: VisualDensity.compact),
-                    segments: const [
-                      ButtonSegment(value: CornerRadius.standard, label: Text('Standard')),
-                      ButtonSegment(value: CornerRadius.sharp, label: Text('Sharp')),
-                      ButtonSegment(value: CornerRadius.rounded, label: Text('Rounded')),
-                    ],
-                    selected: {config.cornerRadius},
-                    onSelectionChanged: (s) => config.setCornerRadius(s.first),
-                  ),
+                _SegRow<CornerRadius>(
+                  icon: Icons.rounded_corner,
+                  label: 'Corner radius',
+                  selected: config.cornerRadius,
+                  onChanged: config.setCornerRadius,
+                  segments: const [
+                    ButtonSegment(value: CornerRadius.standard, label: Text('Standard')),
+                    ButtonSegment(value: CornerRadius.sharp, label: Text('Sharp')),
+                    ButtonSegment(value: CornerRadius.rounded, label: Text('Rounded')),
+                  ],
                 ),
                 const Divider(height: 1),
-                ListTile(
-                  leading: const Icon(Icons.chat_bubble_outline),
-                  title: const Text('Sent bubble color'),
-                  trailing: SegmentedButton<BubbleStyle>(
-                    style: ButtonStyle(visualDensity: VisualDensity.compact),
-                    segments: const [
-                      ButtonSegment(value: BubbleStyle.theme, label: Text('Theme')),
-                      ButtonSegment(value: BubbleStyle.green, label: Text('Green')),
-                      ButtonSegment(value: BubbleStyle.blue, label: Text('Blue')),
-                    ],
-                    selected: {config.bubbleStyle},
-                    onSelectionChanged: (s) => config.setBubbleStyle(s.first),
-                  ),
+                _SegRow<BubbleStyle>(
+                  icon: Icons.chat_bubble_outline,
+                  label: 'Sent bubble color',
+                  selected: config.bubbleStyle,
+                  onChanged: config.setBubbleStyle,
+                  segments: const [
+                    ButtonSegment(value: BubbleStyle.theme, label: Text('Theme')),
+                    ButtonSegment(value: BubbleStyle.green, label: Text('Green')),
+                    ButtonSegment(value: BubbleStyle.blue, label: Text('Blue')),
+                  ],
                 ),
                 const Divider(height: 1),
                 Padding(
@@ -287,3 +277,51 @@ class SettingsPage extends StatelessWidget {
     );
   }
 }
+
+/// A full-width settings row: icon + label, then a segmented control that
+/// stretches across the width so long labels never wrap into vertical text.
+class _SegRow<T> extends StatelessWidget {
+  final IconData icon;
+  final String label;
+  final T selected;
+  final List<ButtonSegment<T>> segments;
+  final ValueChanged<T> onChanged;
+
+  const _SegRow({
+    required this.icon,
+    required this.label,
+    required this.selected,
+    required this.segments,
+    required this.onChanged,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(16, 10, 16, 10),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(children: [
+            Icon(icon, size: 20, color: scheme.onSurfaceVariant),
+            const SizedBox(width: 12),
+            Text(label, style: Theme.of(context).textTheme.titleSmall),
+          ]),
+          const SizedBox(height: 10),
+          SizedBox(
+            width: double.infinity,
+            child: SegmentedButton<T>(
+              segments: segments,
+              selected: {selected},
+              onSelectionChanged: (s) => onChanged(s.first),
+              expandedInsets: EdgeInsets.zero,
+              showSelectedIcon: false,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+

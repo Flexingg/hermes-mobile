@@ -22,6 +22,14 @@ class AppState extends ChangeNotifier {
   final Map<String, List<ChatMessage>> _messages = {};
   String? activeSessionId;
   bool sending = false;
+
+  // Optimistic new-chat flow: a thread opens under a temp id, then swaps to
+  // the real session once the bridge creates it.
+  String? _newChatTargetId;
+  bool _creatingChat = false;
+
+  String? get newChatTargetId => _newChatTargetId;
+  bool get creatingChat => _creatingChat;
   StreamSubscription<ChatMessage>? _sub;
 
   // ---- cached domain data (controller + dashboard) ----
@@ -170,6 +178,49 @@ class AppState extends ChangeNotifier {
     await refreshSessions();
     notifyListeners();
     await openSession(s.id);
+  }
+
+  /// Optimistic start of a brand-new conversation. The thread already shows
+  /// the user's message under [pendingId]; this creates the real session and,
+  /// when ready, points [newChatTargetId] at it so the thread swaps over.
+  Future<void> createNewChat({
+    required String name,
+    required String text,
+    required String pendingId,
+  }) async {
+    _creatingChat = true;
+    _newChatTargetId = null;
+    _messages[pendingId] = [
+      ChatMessage(
+        id: 'opt-${DateTime.now().millisecondsSinceEpoch}',
+        sessionId: pendingId,
+        role: ChatMessageRole.user,
+        text: text,
+        timestamp: DateTime.now(),
+        status: ChatMessageStatus.sent,
+      ),
+    ];
+    notifyListeners();
+    try {
+      final session = await repo.startNewChat(name: name, text: text);
+      _newChatTargetId = session.id;
+      await refreshSessions();
+      await openSession(session.id);
+    } catch (e) {
+      final list = List<ChatMessage>.from(_messages[pendingId] ?? const []);
+      list.add(ChatMessage(
+        id: 'opt-err-${DateTime.now().millisecondsSinceEpoch}',
+        sessionId: pendingId,
+        role: ChatMessageRole.assistant,
+        text: 'Could not start chat: $e',
+        timestamp: DateTime.now(),
+        status: ChatMessageStatus.error,
+      ));
+      _messages[pendingId] = list;
+    } finally {
+      _creatingChat = false;
+      notifyListeners();
+    }
   }
 
   Future<void> deleteSession(String id) async {
