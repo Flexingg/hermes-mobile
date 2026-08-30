@@ -40,6 +40,17 @@ abstract class AppRepository {
   Future<void> deleteSession(String sessionId);
   Future<List<ChatSession>> searchSessions(String query);
 
+  // ---- Groups (multi-agent chat) ------------------------------------
+  Future<List<GroupChat>> groups();
+  Future<GroupChat> createGroup({
+    required String name,
+    required List<String> agents,
+  });
+  Future<List<ChatMessage>> groupMessages(String gid);
+  /// Sends to every agent in a group; streams each agent's tagged reply.
+  Stream<ChatMessage> sendGroupMessage(String gid, String text);
+  Future<void> deleteGroup(String gid);
+
   // ---- Push notifications -------------------------------------------
   /// Registers this device's FCM token with the bridge so it can push to us.
   Future<void> registerDevice(String token);

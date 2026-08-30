@@ -52,6 +52,7 @@ FCM_SERVICE_ACCOUNT = os.environ.get(
 DEVICE_TOKENS = HERMES / "mercury_devices.json"
 UPLOADS_DIR = HERMES / "uploads"
 UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
+GROUP_STORE = HERMES / "mercury_groups.json"
 
 app = FastAPI(title="Hermes Mobile bridge", version="1.0")
 app.add_middleware(
@@ -342,6 +343,102 @@ def _media_in(text: str | None) -> list[dict]:
     return out
 
 
+# ---------------------------------------------------------------------------
+# Group chats (multi-agent fan-out)
+# ---------------------------------------------------------------------------
+def _load_groups() -> list[dict]:
+    try:
+        return json.loads(GROUP_STORE.read_text()).get("groups", [])
+    except Exception:
+        return []
+
+
+def _save_groups(groups: list[dict]) -> None:
+    GROUP_STORE.write_text(json.dumps({"groups": groups}, indent=2))
+
+
+def _get_group(gid: str) -> dict | None:
+    for g in _load_groups():
+        if g["id"] == gid:
+            return g
+    return None
+
+
+def _append_group_message(gid: str, msg: dict) -> None:
+    groups = _load_groups()
+    for g in groups:
+        if g["id"] == gid:
+            g.setdefault("messages", []).append(msg)
+            g["lastActivity"] = _iso(_now())
+            g["lastPreview"] = (msg.get("text") or "")[:140]
+            g["messageCount"] = len(g["messages"])
+            break
+    _save_groups(groups)
+
+
+def _profile_for(agent: str) -> str | None:
+    """Map an agent display name to its Hermes profile. @hermes = default."""
+    if agent == "@hermes":
+        return None
+    a = agent.lstrip("@").strip()
+    return a or None
+
+
+def _spawn_group_reply(gid: str, text: str) -> None:
+    group = _get_group(gid)
+    if not group:
+        return
+    agents = group.get("agents", [])
+    if not agents:
+        return
+    lock = threading.Lock()
+    done = {"n": 0}
+
+    def runner(agent: str) -> None:
+        _run_group_agent(gid, agent, text)
+        with lock:
+            done["n"] += 1
+            if done["n"] >= len(agents):
+                _broadcast(gid, {"event": "complete"})
+
+    for agent in agents:
+        threading.Thread(target=runner, args=(agent,), daemon=True).start()
+
+
+def _run_group_agent(gid: str, agent: str, text: str) -> None:
+    _broadcast(gid, {"event": "start", "agent": agent})
+    cmd = [HERMES_BIN, "chat", "-q", text, "-Q"]
+    profile = _profile_for(agent)
+    if profile:
+        cmd += ["-p", profile]
+    acc = ""
+    try:
+        proc = subprocess.Popen(
+            cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True
+        )
+        if proc.stdout is not None:
+            for line in proc.stdout:
+                line = line.rstrip("\n")
+                if not line.strip():
+                    continue
+                if line.startswith("session_id:") or line.startswith("Session:"):
+                    continue
+                _broadcast(gid, {"event": "chunk", "agent": agent, "delta": line + "\n"})
+                acc += line + "\n"
+        proc.wait()
+    except Exception:
+        pass
+    _append_group_message(gid, {
+        "id": f"g-{int(time.time() * 1000)}-{agent}",
+        "role": "assistant",
+        "agent": agent,
+        "text": acc.strip(),
+        "timestamp": _iso(_now()),
+        "media": _media_in(acc),
+    })
+    _broadcast(gid, {"event": "done", "agent": agent})
+
+
 @app.post("/api/v1/sessions")
 def create_session(body: dict):
     import uuid
@@ -494,6 +591,96 @@ def get_file(path: str = ""):
         media_type="application/octet-stream",
         headers={"Content-Disposition": f'attachment; filename="{name}"'},
     )
+
+
+@app.get("/api/v1/groups")
+def groups():
+    return [
+        {
+            "id": g["id"],
+            "name": g.get("name", "Group"),
+            "agents": g.get("agents", []),
+            "lastPreview": g.get("lastPreview", ""),
+            "lastTimestamp": g.get("lastActivity"),
+            "messageCount": g.get("messageCount", len(g.get("messages", []))),
+        }
+        for g in _load_groups()
+    ]
+
+
+@app.post("/api/v1/groups")
+def create_group(body: dict):
+    import uuid
+
+    name = (body.get("name") or "").strip()[:100]
+    agents = [a.strip() for a in (body.get("agents") or []) if a and a.strip()][:8]
+    if not agents:
+        raise HTTPException(status_code=400, detail="at least one agent required")
+    gid = f"grp_{int(time.time())}_{uuid.uuid4().hex[:4]}"
+    group = {
+        "id": gid,
+        "name": name or ", ".join(agents),
+        "agents": agents,
+        "created": _iso(_now()),
+        "lastActivity": _iso(_now()),
+        "lastPreview": "Group created",
+        "messageCount": 0,
+        "messages": [],
+    }
+    all_groups = _load_groups()
+    all_groups.insert(0, group)
+    _save_groups(all_groups)
+    return {k: v for k, v in group.items() if k != "messages"}
+
+
+@app.get("/api/v1/groups/{gid}/messages")
+def group_messages(gid: str):
+    g = _get_group(gid)
+    if not g:
+        raise HTTPException(status_code=404, detail="group not found")
+    return g.get("messages", [])
+
+
+@app.post("/api/v1/groups/{gid}/messages")
+def group_send(gid: str, body: dict):
+    g = _get_group(gid)
+    if not g:
+        raise HTTPException(status_code=404, detail="group not found")
+    text = (body.get("text") or "").strip()
+    _append_group_message(gid, {
+        "id": f"g-{int(time.time() * 1000)}-user",
+        "role": "user",
+        "agent": None,
+        "text": text,
+        "timestamp": _iso(_now()),
+        "media": [],
+    })
+    _spawn_group_reply(gid, text)
+    return {"ok": True}
+
+
+@app.delete("/api/v1/groups/{gid}")
+def delete_group(gid: str):
+    groups = _load_groups()
+    _save_groups([g for g in groups if g["id"] != gid])
+    return {"ok": True}
+
+
+@app.websocket("/ws/group/{gid}")
+async def ws_group(websocket: WebSocket, gid: str):
+    await websocket.accept()
+    q: asyncio.Queue = asyncio.Queue()
+    _register_queue(gid, q)
+    try:
+        while True:
+            payload = await q.get()
+            await websocket.send_text(json.dumps(payload))
+            if payload.get("event") == "complete":
+                break
+    except WebSocketDisconnect:
+        pass
+    finally:
+        _unregister_queue(gid, q)
 
 
 @app.post("/api/v1/devices/register")

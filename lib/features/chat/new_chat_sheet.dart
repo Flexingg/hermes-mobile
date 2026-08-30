@@ -2,8 +2,10 @@ import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import '../../state/app_state.dart';
 import 'chat_thread_page.dart';
+import 'group_chat_page.dart';
 
-/// Google-Messages-style "Start chat" sheet: pick a bot, type a first message.
+/// Google-Messages-style "Start chat" sheet: pick a bot (direct) or several
+/// bots (group), then type a first message.
 class NewChatSheet extends StatefulWidget {
   const NewChatSheet({super.key});
 
@@ -14,6 +16,8 @@ class NewChatSheet extends StatefulWidget {
 class _NewChatSheetState extends State<NewChatSheet> {
   String? _botId;
   final _controller = TextEditingController();
+  bool _groupMode = false;
+  final Set<String> _groupAgents = {};
 
   @override
   void dispose() {
@@ -40,19 +44,47 @@ class _NewChatSheetState extends State<NewChatSheet> {
         mainAxisSize: MainAxisSize.min,
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Text('Start chat',
+          Text(_groupMode ? 'New group' : 'Start chat',
               style: Theme.of(context).textTheme.titleLarge),
           const SizedBox(height: 4),
-          Text('Choose an agent and send a first message.',
+          Text(
+              _groupMode
+                  ? 'Pick two or more agents — every reply fans out to all of them.'
+                  : 'Choose an agent and send a first message.',
               style: Theme.of(context)
                   .textTheme
                   .bodyMedium
                   ?.copyWith(color: scheme.onSurfaceVariant)),
-          const SizedBox(height: 16),
+          const SizedBox(height: 12),
+          SegmentedButton<bool>(
+            segments: const [
+              ButtonSegment(value: false, label: Text('Direct'), icon: Icon(Icons.person_outline, size: 18)),
+              ButtonSegment(value: true, label: Text('Group'), icon: Icon(Icons.groups_outlined, size: 18)),
+            ],
+            selected: {_groupMode},
+            showSelectedIcon: false,
+            onSelectionChanged: (s) => setState(() => _groupMode = s.first),
+          ),
+          const SizedBox(height: 12),
           Wrap(
             spacing: 8,
             runSpacing: 8,
             children: bots.map((b) {
+              if (_groupMode) {
+                final selected = _groupAgents.contains(b.name);
+                return FilterChip(
+                  avatar: Text(b.emoji),
+                  label: Text(b.name),
+                  selected: selected,
+                  onSelected: (v) => setState(() {
+                    if (v) {
+                      _groupAgents.add(b.name);
+                    } else {
+                      _groupAgents.remove(b.name);
+                    }
+                  }),
+                );
+              }
               final selected = _botId == b.id;
               return ChoiceChip(
                 avatar: Text(b.emoji),
@@ -77,9 +109,9 @@ class _NewChatSheetState extends State<NewChatSheet> {
           SizedBox(
             width: double.infinity,
             child: FilledButton.icon(
-              onPressed: _botId == null ? null : _start,
-              icon: const Icon(Icons.send),
-              label: const Text('Start chat'),
+              onPressed: _canStart() ? _start : null,
+              icon: _groupMode ? const Icon(Icons.groups) : const Icon(Icons.send),
+              label: Text(_groupMode ? 'Create group' : 'Start chat'),
             ),
           ),
         ],
@@ -87,19 +119,48 @@ class _NewChatSheetState extends State<NewChatSheet> {
     );
   }
 
-  void _start() {
+  bool _canStart() {
+    if (_groupMode) return _groupAgents.length >= 2;
+    return _botId != null;
+  }
+
+  Future<void> _start() async {
     final state = context.read<AppState>();
+    final text = _controller.text.trim();
+    final nav = Navigator.of(context);
+
+    if (_groupMode) {
+      final agents = _groupAgents.toList();
+      if (agents.length < 2) return;
+      try {
+        final g = await state.createGroup(name: '', agents: agents);
+        if (!mounted) return;
+        nav.pop(); // close the sheet
+        nav.push(
+          MaterialPageRoute(
+            builder: (_) => GroupChatPage(
+              groupId: g.id,
+              name: g.name,
+              agents: g.agents,
+            ),
+          ),
+        );
+      } catch (e) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text('Could not create group: $e')),
+          );
+        }
+      }
+      return;
+    }
+
+    if (_botId == null || text.isEmpty) return;
     final bot = state.servers
         .expand((s) => s.bots)
         .firstWhere((b) => b.id == _botId);
-    final text = _controller.text.trim();
-    if (text.isEmpty) return;
-
-    // Jump straight into the messages UI. The real session is created in the
-    // background by ChatThreadPage (isNewChat) and swaps in when ready.
-    final nav = Navigator.of(context);
     final pendingId = 'new_${DateTime.now().millisecondsSinceEpoch}';
-    nav.pop(); // close the sheet
+    nav.pop();
     nav.push(
       MaterialPageRoute(
         builder: (_) => ChatThreadPage(

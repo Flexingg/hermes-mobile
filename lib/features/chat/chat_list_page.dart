@@ -7,6 +7,7 @@ import '../../state/app_state.dart';
 import '../../widgets/common.dart';
 import '../settings/servers_page.dart';
 import 'chat_thread_page.dart';
+import 'group_chat_page.dart';
 import 'new_chat_sheet.dart';
 import 'search_page.dart';
 
@@ -54,17 +55,44 @@ class ChatListPage extends StatelessWidget {
         child: const Icon(Icons.chat_bubble_outline_rounded),
       ),
       body: RefreshIndicator(
-        onRefresh: () => state.refreshSessions(),
-        child: state.sessions.isEmpty
+        onRefresh: () async {
+          await state.refreshSessions();
+          await state.loadGroups();
+        },
+        child: (state.sessions.isEmpty && state.groups.isEmpty)
             ? const StatusMessage(
                 title: 'No conversations yet',
-                subtitle: 'Tap + to start chatting with Hermes.',
+                subtitle: 'Tap + to start chatting with Hermes or make a group.',
                 icon: Icons.forum_outlined)
             : ListView.builder(
                 padding: const EdgeInsets.only(bottom: 88),
-                itemCount: state.sessions.length,
+                itemCount: state.groups.length +
+                    state.sessions.length +
+                    (state.groups.isNotEmpty ? 1 : 0),
                 itemBuilder: (context, i) {
-                  final s = state.sessions[i];
+                  final gCount = state.groups.length;
+                  final headerOffset = gCount > 0 ? 1 : 0;
+                  if (gCount > 0 && i == 0) {
+                    return const _SectionHeader('Groups');
+                  }
+                  if (i < headerOffset + gCount) {
+                    final g = state.groups[i - headerOffset];
+                    return _GroupTile(
+                      group: g,
+                      onTap: () {
+                        Navigator.of(context).push(
+                          MaterialPageRoute(
+                            builder: (_) => GroupChatPage(
+                              groupId: g.id,
+                              name: g.name,
+                              agents: g.agents,
+                            ),
+                          ),
+                        );
+                      },
+                    );
+                  }
+                  final s = state.sessions[i - headerOffset - gCount];
                   return _SessionTile(
                     session: s,
                     state: state,
@@ -79,6 +107,89 @@ class ChatListPage extends StatelessWidget {
                   );
                 },
               ),
+      ),
+    );
+  }
+}
+
+class _SectionHeader extends StatelessWidget {
+  final String label;
+  const _SectionHeader(this.label);
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(16, 12, 16, 4),
+      child: Text(label.toUpperCase(),
+          style: Theme.of(context)
+              .textTheme
+              .labelSmall
+              ?.copyWith(color: scheme.primary, fontWeight: FontWeight.w700, letterSpacing: 0.8)),
+    );
+  }
+}
+
+class _GroupTile extends StatelessWidget {
+  final GroupChat group;
+  final VoidCallback onTap;
+  const _GroupTile({required this.group, required this.onTap});
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    return ListTile(
+      onTap: onTap,
+      leading: Stack(
+        clipBehavior: Clip.none,
+        children: [
+          CircleAvatar(
+            radius: 22,
+            backgroundColor: scheme.primaryContainer,
+            child: Icon(Icons.groups, color: scheme.onPrimaryContainer),
+          ),
+          if (group.agents.isNotEmpty)
+            Positioned(
+              right: -2,
+              bottom: -2,
+              child: CircleAvatar(
+                radius: 10,
+                backgroundColor: scheme.surface,
+                child: ClipOval(
+                  child: Image.asset(petAssetForAgent(group.agents.first),
+                      width: 18, height: 18, fit: BoxFit.cover),
+                ),
+              ),
+            ),
+        ],
+      ),
+      title: Row(
+        children: [
+          Expanded(
+            child: Text(group.name,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: const TextStyle(fontWeight: FontWeight.w600)),
+          ),
+          Text(formatRelativeTime(group.lastTimestamp),
+              style: Theme.of(context)
+                  .textTheme
+                  .labelSmall
+                  ?.copyWith(color: scheme.onSurfaceVariant)),
+        ],
+      ),
+      subtitle: Row(
+        children: [
+          Expanded(
+            child: Text(group.lastPreview,
+                maxLines: 2,
+                overflow: TextOverflow.ellipsis,
+                style: Theme.of(context)
+                    .textTheme
+                    .bodyMedium
+                    ?.copyWith(color: scheme.onSurfaceVariant)),
+          ),
+        ],
       ),
     );
   }

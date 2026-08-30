@@ -241,6 +241,105 @@ class HermesRepository implements AppRepository {
       sessions().then((s) => s.where((x) =>
           x.title.toLowerCase().contains(query.toLowerCase())).toList());
 
+  // ---- Groups (multi-agent chat) --------------------------------------
+  @override
+  Future<List<GroupChat>> groups() async {
+    final data = await _get('/api/v1/groups') as List<dynamic>;
+    return data.cast<Map<String, dynamic>>().map(_groupFromJson).toList();
+  }
+
+  GroupChat _groupFromJson(Map<String, dynamic> j) => GroupChat(
+        id: (j['id'] ?? '').toString(),
+        name: j['name']?.toString() ?? 'Group',
+        agents: (j['agents'] as List? ?? [])
+            .map((a) => a.toString())
+            .toList(),
+        lastPreview: j['lastPreview']?.toString() ?? '',
+        lastTimestamp: _dt(j['lastTimestamp']),
+        messageCount: (j['messageCount'] as num?)?.toInt() ?? 0,
+      );
+
+  @override
+  Future<GroupChat> createGroup({
+    required String name,
+    required List<String> agents,
+  }) async {
+    final data = await _post('/api/v1/groups', {'name': name, 'agents': agents});
+    return _groupFromJson(data as Map<String, dynamic>);
+  }
+
+  @override
+  Future<List<ChatMessage>> groupMessages(String gid) async {
+    final data = await _get('/api/v1/groups/$gid/messages') as List<dynamic>;
+    return data
+        .cast<Map<String, dynamic>>()
+        .map((j) => _groupMessageFromJson(j, gid))
+        .toList();
+  }
+
+  ChatMessage _groupMessageFromJson(Map<String, dynamic> j, String gid) =>
+      ChatMessage(
+        id: (j['id'] ?? '').toString(),
+        sessionId: gid,
+        role: j['role'] == 'user' ? ChatMessageRole.user : ChatMessageRole.assistant,
+        text: j['text']?.toString() ?? '',
+        timestamp: _dt(j['timestamp']),
+        agent: j['agent']?.toString(),
+        attachments: (j['media'] as List? ?? [])
+            .whereType<Map<String, dynamic>>()
+            .map((m) => Attachment(
+                  name: m['name']?.toString() ?? 'file',
+                  url: m['path']?.toString() ?? '',
+                  mimeType: 'application/octet-stream',
+                  path: m['path']?.toString(),
+                  kind: 'file',
+                ))
+            .toList(),
+      );
+
+  @override
+  Stream<ChatMessage> sendGroupMessage(String gid, String text) async* {
+    await _post('/api/v1/groups/$gid/messages', {'text': text});
+    final wsUrl = baseUrl.replaceFirst('http', 'ws').replaceFirst('https', 'wss');
+    final channel =
+        WebSocketChannel.connect(Uri.parse('$wsUrl/ws/group/$gid'));
+    final acc = <String, String>{};
+    try {
+      await for (final raw in channel.stream) {
+        final data = jsonDecode(raw as String);
+        final event = data['event'] as String? ?? 'chunk';
+        final agent = data['agent'] as String?;
+        final delta = data['delta'] as String? ?? '';
+        final id = 'g-live-${agent ?? 'x'}';
+        if (event == 'start' && agent != null) {
+          acc[agent] = '';
+          yield ChatMessage(
+              id: id, sessionId: gid, role: ChatMessageRole.assistant,
+              text: '', timestamp: DateTime.now(),
+              status: ChatMessageStatus.streaming, agent: agent);
+        } else if (event == 'chunk' && agent != null) {
+          acc[agent] = (acc[agent] ?? '') + delta;
+          yield ChatMessage(
+              id: id, sessionId: gid, role: ChatMessageRole.assistant,
+              text: acc[agent]!, timestamp: DateTime.now(),
+              status: ChatMessageStatus.streaming, agent: agent);
+        } else if (event == 'done' && agent != null) {
+          yield ChatMessage(
+              id: id, sessionId: gid, role: ChatMessageRole.assistant,
+              text: acc[agent] ?? '', timestamp: DateTime.now(),
+              status: ChatMessageStatus.sent, agent: agent);
+        } else if (event == 'complete') {
+          break;
+        }
+      }
+    } finally {
+      await channel.sink.close();
+    }
+  }
+
+  @override
+  Future<void> deleteGroup(String gid) async => _delete('/api/v1/groups/$gid');
+
   // ---- Cron / skills / memory ----------------------------------------
   @override
   Future<List<CronJob>> cronJobs() async {

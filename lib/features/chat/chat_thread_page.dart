@@ -19,6 +19,8 @@ class ChatThreadPage extends StatefulWidget {
   final bool isNewChat;
   final String? name;
   final String? pendingText;
+  /// True for a multi-agent group chat (shows per-agent avatars).
+  final bool isGroup;
 
   const ChatThreadPage({
     super.key,
@@ -26,6 +28,7 @@ class ChatThreadPage extends StatefulWidget {
     this.isNewChat = false,
     this.name,
     this.pendingText,
+    this.isGroup = false,
   });
 
   @override
@@ -136,12 +139,22 @@ class _ChatThreadPageState extends State<ChatThreadPage> {
                     itemCount: messages.length,
                     itemBuilder: (context, i) {
                       final m = messages[i];
+                      // Skip "empty" messages (no text, no attachments, not
+                      // streaming) so orphan timestamps don't render as
+                      // standalone bubbles.
+                      if (m.role != ChatMessageRole.tool &&
+                          m.text.trim().isEmpty &&
+                          m.attachments.isEmpty &&
+                          m.status != ChatMessageStatus.streaming) {
+                        return const SizedBox.shrink();
+                      }
                       final bubble = (m.isAssistant && m.id.startsWith('u-') == false)
                           ? MessageBubble(
                               message: m,
                               avatarColor:
                                   session?.avatarColor ?? scheme.primary,
                               avatarImagePath: petAssetForAgent(agentName),
+                              showAvatar: widget.isGroup,
                             )
                           : MessageBubble(message: m);
                       return _InteractiveBubble(message: m, child: bubble);

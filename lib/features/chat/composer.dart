@@ -9,7 +9,10 @@ import '../../state/app_state.dart';
 /// Google-Messages-style message composer: attach(image/file) · text · voice/send.
 class MessageComposer extends StatefulWidget {
   final bool enabled;
-  const MessageComposer({super.key, this.enabled = true});
+
+  /// Optional override for where text is sent (used by group chats).
+  final void Function(String text)? onSend;
+  const MessageComposer({super.key, this.enabled = true, this.onSend});
 
   @override
   State<MessageComposer> createState() => _MessageComposerState();
@@ -35,6 +38,11 @@ class _MessageComposerState extends State<MessageComposer> {
   void _send() {
     final text = _controller.text.trim();
     if (text.isEmpty) return;
+    if (widget.onSend != null) {
+      widget.onSend!(text);
+      _controller.clear();
+      return;
+    }
     context.read<AppState>().sendMessage(text);
     _controller.clear();
   }

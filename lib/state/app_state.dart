@@ -33,6 +33,14 @@ class AppState extends ChangeNotifier {
   bool get creatingChat => _creatingChat;
   StreamSubscription<ChatMessage>? _sub;
 
+  // ---- Group chats (multi-agent) ----
+  List<GroupChat> _groups = [];
+  final Map<String, List<ChatMessage>> _groupMessages = {};
+  bool groupSending = false;
+  StreamSubscription<ChatMessage>? _groupSub;
+  List<GroupChat> get groups => List.unmodifiable(_groups);
+  List<ChatMessage> groupMessagesFor(String gid) => _groupMessages[gid] ?? [];
+
   // ---- cached domain data (controller + dashboard) ----
   List<CronJob> cronJobs = [];
   List<Skill> skills = [];
@@ -146,6 +154,9 @@ class AppState extends ChangeNotifier {
     commands = [];
     webhooks = [];
     servers = [];
+    _groups = [];
+    _groupMessages.clear();
+    _groupSub?.cancel();
     notifyListeners();
   }
 
@@ -243,6 +254,76 @@ class AppState extends ChangeNotifier {
     await refreshSessions();
   }
 
+  // ---- Group chats (multi-agent) ------------------------------------
+  Future<void> loadGroups() async {
+    try {
+      _groups = await repo.groups();
+      notifyListeners();
+    } catch (_) {}
+  }
+
+  Future<GroupChat> createGroup({
+    required String name,
+    required List<String> agents,
+  }) async {
+    final g = await repo.createGroup(name: name, agents: agents);
+    _groups = [g, ..._groups.where((x) => x.id != g.id)];
+    notifyListeners();
+    return g;
+  }
+
+  Future<void> openGroup(String gid) async {
+    try {
+      _groupMessages[gid] = await repo.groupMessages(gid);
+      notifyListeners();
+    } catch (_) {}
+  }
+
+  Future<void> sendGroupMessage(String gid, String text) async {
+    if (groupSending) return;
+    groupSending = true;
+    notifyListeners();
+    final userMsg = ChatMessage(
+      id: 'u-${DateTime.now().microsecondsSinceEpoch}',
+      sessionId: gid,
+      role: ChatMessageRole.user,
+      text: text,
+      timestamp: DateTime.now(),
+    );
+    _groupMessages.putIfAbsent(gid, () => []).add(userMsg);
+    notifyListeners();
+
+    await _groupSub?.cancel();
+    _groupSub = repo.sendGroupMessage(gid, text).listen(
+      (m) {
+        final list = _groupMessages.putIfAbsent(gid, () => []);
+        final idx = list.indexWhere((x) => x.id == m.id);
+        if (idx >= 0) {
+          list[idx] = m;
+        } else {
+          list.add(m);
+        }
+        notifyListeners();
+      },
+      onError: (e) {
+        error = e.toString();
+        groupSending = false;
+        notifyListeners();
+      },
+      onDone: () {
+        groupSending = false;
+        notifyListeners();
+      },
+    );
+  }
+
+  Future<void> deleteGroup(String gid) async {
+    await repo.deleteGroup(gid);
+    _groupMessages.remove(gid);
+    _groups = _groups.where((g) => g.id != gid).toList();
+    notifyListeners();
+  }
+
   Future<void> toggleStarred(String id) async {
     await repo.toggleStarred(id);
     await refreshSessions();
@@ -325,6 +406,7 @@ class AppState extends ChangeNotifier {
       _safe(loadActivities),
       _safe(loadCommands),
       _safe(loadWebhooks),
+      _safe(loadGroups),
     ]);
     busy = false;
     notifyListeners();

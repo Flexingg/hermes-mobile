@@ -21,13 +21,14 @@ class MessageBubble extends StatelessWidget {
   final Color? avatarColor;
   final String? avatarEmoji;
   final String? avatarImagePath;
-
+  final bool showAvatar;
   const MessageBubble({
     super.key,
     required this.message,
     this.avatarColor,
     this.avatarEmoji,
     this.avatarImagePath,
+    this.showAvatar = true,
   });
 
   @override
@@ -41,6 +42,7 @@ class MessageBubble extends StatelessWidget {
           avatarColor: avatarColor,
           avatarEmoji: avatarEmoji,
           avatarImagePath: avatarImagePath,
+          showAvatar: showAvatar,
         );
       case ChatMessageRole.tool:
         return _ToolBubble(message: message);
@@ -115,11 +117,13 @@ class _ReceivedBubble extends StatelessWidget {
   final Color? avatarColor;
   final String? avatarEmoji;
   final String? avatarImagePath;
+  final bool showAvatar;
   const _ReceivedBubble({
     required this.message,
     this.avatarColor,
     this.avatarEmoji,
     this.avatarImagePath,
+    this.showAvatar = true,
   });
 
   @override
@@ -138,16 +142,17 @@ class _ReceivedBubble extends StatelessWidget {
       child: Row(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Padding(
-            padding: const EdgeInsets.only(top: 4, right: 8),
-            child: Avatar(
-              label: '',
-              color: avatarColor ?? scheme.primary,
-              emoji: avatarEmoji,
-              imagePath: avatarImagePath,
-              radius: 16,
+          if (showAvatar)
+            Padding(
+              padding: const EdgeInsets.only(top: 4, right: 8),
+              child: Avatar(
+                label: '',
+                color: avatarColor ?? scheme.primary,
+                emoji: avatarEmoji,
+                imagePath: avatarImagePath,
+                radius: 16,
+              ),
             ),
-          ),
           Flexible(
             child: Container(
               padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
@@ -164,6 +169,18 @@ class _ReceivedBubble extends StatelessWidget {
                 crossAxisAlignment: CrossAxisAlignment.start,
                 mainAxisSize: MainAxisSize.min,
                 children: [
+                  if (message.agent != null)
+                    Padding(
+                      padding: const EdgeInsets.only(bottom: 3),
+                      child: Text(
+                        message.agent!,
+                        style: TextStyle(
+                          fontSize: 11,
+                          fontWeight: FontWeight.w600,
+                          color: scheme.primary,
+                        ),
+                      ),
+                    ),
                   if (isStreaming && message.text.isEmpty)
                     const _TypingIndicator()
                   else if (isStreaming)

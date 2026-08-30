@@ -36,6 +36,7 @@ class ChatMessage {
   final List<Attachment> attachments;
   final ChatMessageStatus status;
   final String? toolName; // for role == tool
+  final String? agent; // for group chats: which agent produced this message
 
   const ChatMessage({
     required this.id,
@@ -46,6 +47,7 @@ class ChatMessage {
     this.attachments = const [],
     this.status = ChatMessageStatus.sent,
     this.toolName,
+    this.agent,
   });
 
   bool get isUser => role == ChatMessageRole.user;
@@ -111,6 +113,24 @@ class ChatSession {
       avatarColor: avatarColor,
     );
   }
+}
+
+/// A multi-agent group conversation (fan-out to several agents).
+class GroupChat {
+  final String id;
+  final String name;
+  final List<String> agents;
+  final String lastPreview;
+  final DateTime lastTimestamp;
+  final int messageCount;
+  const GroupChat({
+    required this.id,
+    required this.name,
+    required this.agents,
+    required this.lastPreview,
+    required this.lastTimestamp,
+    this.messageCount = 0,
+  });
 }
 
 /// A connected Hermes server (gateway).
