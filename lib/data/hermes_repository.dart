@@ -118,6 +118,30 @@ class HermesRepository implements AppRepository {
     await _post('/api/v1/devices/test', {'title': ?title, 'message': ?message});
   }
 
+  /// Strips `MEDIA:<path>` references from agent text and turns them into
+  /// downloadable attachments, so files the agent hands over render as chips
+  /// in real-time during streaming (not only after a reload). Dedupes by path.
+  ({String text, List<Attachment> attachments}) _parseMedia(String raw) {
+    final re = RegExp(r'MEDIA:\s*(\S+)');
+    final seen = <String>{};
+    final attachments = <Attachment>[];
+    final cleaned = raw.replaceAllMapped(re, (m) {
+      final p = (m.group(1) ?? '').trim();
+      if (p.isNotEmpty && seen.add(p)) {
+        final name = p.split('/').last;
+        attachments.add(Attachment(
+          name: name.isEmpty ? 'file' : name,
+          url: p,
+          mimeType: 'application/octet-stream',
+          path: p,
+          kind: 'file',
+        ));
+      }
+      return '';
+    }).trim();
+    return (text: cleaned, attachments: attachments);
+  }
+
   @override
   Stream<ChatMessage> sendMessage(String sessionId, String text,
       {List<Attachment> attachments = const []}) async* {
@@ -156,26 +180,30 @@ class HermesRepository implements AppRepository {
         );
       }
       acc += delta;
+      final parsed = _parseMedia(acc);
       yield ChatMessage(
         id: replyId,
         sessionId: sessionId,
         role: ChatMessageRole.assistant,
-        text: acc,
+        text: parsed.text,
         timestamp: DateTime.now(),
         status: ChatMessageStatus.streaming,
+        attachments: parsed.attachments,
       );
       if (event == 'done') break;
     }
     await channel.sink.close();
 
     if (acc.isNotEmpty) {
+      final parsed = _parseMedia(acc);
       yield ChatMessage(
         id: replyId,
         sessionId: sessionId,
         role: ChatMessageRole.assistant,
-        text: acc,
+        text: parsed.text,
         timestamp: DateTime.now(),
         status: ChatMessageStatus.sent,
+        attachments: parsed.attachments,
       );
     }
   }
@@ -319,15 +347,19 @@ class HermesRepository implements AppRepository {
               status: ChatMessageStatus.streaming, agent: agent);
         } else if (event == 'chunk' && agent != null) {
           acc[agent] = (acc[agent] ?? '') + delta;
+          final parsed = _parseMedia(acc[agent]!);
           yield ChatMessage(
               id: id, sessionId: gid, role: ChatMessageRole.assistant,
-              text: acc[agent]!, timestamp: DateTime.now(),
-              status: ChatMessageStatus.streaming, agent: agent);
+              text: parsed.text, timestamp: DateTime.now(),
+              status: ChatMessageStatus.streaming, agent: agent,
+              attachments: parsed.attachments);
         } else if (event == 'done' && agent != null) {
+          final parsed = _parseMedia(acc[agent] ?? '');
           yield ChatMessage(
               id: id, sessionId: gid, role: ChatMessageRole.assistant,
-              text: acc[agent] ?? '', timestamp: DateTime.now(),
-              status: ChatMessageStatus.sent, agent: agent);
+              text: parsed.text, timestamp: DateTime.now(),
+              status: ChatMessageStatus.sent, agent: agent,
+              attachments: parsed.attachments);
         } else if (event == 'complete') {
           break;
         }

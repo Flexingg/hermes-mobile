@@ -312,7 +312,7 @@ def messages(session_id: str):
                 "id": str(r["id"]),
                 "sessionId": session_id,
                 "role": r["role"] if r["role"] in ("user", "assistant", "system") else "tool",
-                "text": text,
+                "text": _strip_media(text),
                 "timestamp": _iso(r["timestamp"]),
                 "toolName": r["tool_name"],
                 "media": _media_in(text) if r["role"] == "assistant" else [],
@@ -341,6 +341,12 @@ def _media_in(text: str | None) -> list[dict]:
         p = Path(m.group(1)).expanduser()
         out.append({"path": str(p), "name": p.name})
     return out
+
+
+def _strip_media(text: str | None) -> str:
+    """Remove `MEDIA:<path>` tokens from the visible text (the file is shown
+    as a download chip, not as a raw path in the bubble)."""
+    return re.sub(r"MEDIA:\s*\S+", "", text or "").strip()
 
 
 # ---------------------------------------------------------------------------
@@ -432,7 +438,7 @@ def _run_group_agent(gid: str, agent: str, text: str) -> None:
         "id": f"g-{int(time.time() * 1000)}-{agent}",
         "role": "assistant",
         "agent": agent,
-        "text": acc.strip(),
+        "text": _strip_media(acc),
         "timestamp": _iso(_now()),
         "media": _media_in(acc),
     })
