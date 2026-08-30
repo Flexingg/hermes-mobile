@@ -49,10 +49,16 @@ class HermesMobileApp extends StatelessWidget {
             theme: AppTheme.light(
               dynamicScheme: useDynamic ? lightDynamic : null,
               seedOverride: seed,
+              density: cfg.uiDensity,
+              radius: cfg.cornerRadius,
+              bubble: cfg.bubbleStyle,
             ),
             darkTheme: AppTheme.dark(
               dynamicScheme: useDynamic ? darkDynamic : null,
               seedOverride: seed,
+              density: cfg.uiDensity,
+              radius: cfg.cornerRadius,
+              bubble: cfg.bubbleStyle,
             ),
             themeMode: _resolve(cfg.themePreference),
             home: const VaultGate(

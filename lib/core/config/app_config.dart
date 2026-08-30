@@ -13,6 +13,9 @@ class AppConfig extends ChangeNotifier {
   static const _kDynamic = 'cfg_dynamic';
   static const _kVault = 'cfg_vault';
   static const _kNotif = 'cfg_notif';
+  static const _kDensity = 'cfg_density';
+  static const _kRadius = 'cfg_radius';
+  static const _kBubble = 'cfg_bubble';
   static const _kServerName = 'cfg_server_name';
   static const _kServerBase = 'cfg_server_base';
   static const _kServerTokenRef = 'cfg_server_token_ref';
@@ -22,6 +25,9 @@ class AppConfig extends ChangeNotifier {
   bool _vaultEnabled = false;
   bool _notificationsEnabled = false;
   Color? _seedColor;
+  UiDensity _uiDensity = UiDensity.comfortable;
+  CornerRadius _cornerRadius = CornerRadius.standard;
+  BubbleStyle _bubbleStyle = BubbleStyle.green;
 
   String? _serverName;
   String? _serverBaseUrl;
@@ -32,6 +38,9 @@ class AppConfig extends ChangeNotifier {
   bool get vaultEnabled => _vaultEnabled;
   bool get notificationsEnabled => _notificationsEnabled;
   Color? get seedColor => _seedColor;
+  UiDensity get uiDensity => _uiDensity;
+  CornerRadius get cornerRadius => _cornerRadius;
+  BubbleStyle get bubbleStyle => _bubbleStyle;
 
   String? get serverName => _serverName;
   String? get serverBaseUrl => _serverBaseUrl;
@@ -49,6 +58,9 @@ class AppConfig extends ChangeNotifier {
     _dynamicColor = prefs.getBool(_kDynamic) ?? true;
     _vaultEnabled = prefs.getBool(_kVault) ?? false;
     _notificationsEnabled = prefs.getBool(_kNotif) ?? false;
+    _uiDensity = UiDensity.values[prefs.getInt(_kDensity) ?? 0];
+    _cornerRadius = CornerRadius.values[prefs.getInt(_kRadius) ?? 0];
+    _bubbleStyle = BubbleStyle.values[prefs.getInt(_kBubble) ?? 1];
     _serverName = prefs.getString(_kServerName);
     _serverBaseUrl = prefs.getString(_kServerBase);
     _serverTokenRef = prefs.getString(_kServerTokenRef);
@@ -130,5 +142,44 @@ class AppConfig extends ChangeNotifier {
     notifyListeners();
     final p = await SharedPreferences.getInstance();
     await p.setBool(_kNotif, value);
+  }
+
+  Future<void> setUiDensity(UiDensity value) async {
+    _uiDensity = value;
+    notifyListeners();
+    final p = await SharedPreferences.getInstance();
+    await p.setInt(_kDensity, value.index);
+  }
+
+  Future<void> setCornerRadius(CornerRadius value) async {
+    _cornerRadius = value;
+    notifyListeners();
+    final p = await SharedPreferences.getInstance();
+    await p.setInt(_kRadius, value.index);
+  }
+
+  Future<void> setBubbleStyle(BubbleStyle value) async {
+    _bubbleStyle = value;
+    notifyListeners();
+    final p = await SharedPreferences.getInstance();
+    await p.setInt(_kBubble, value.index);
+  }
+
+  /// Reset appearance + UI preferences to their defaults.
+  Future<void> resetAppearance() async {
+    _dynamicColor = true;
+    _themePreference = ThemePreference.system;
+    _seedColor = null;
+    _uiDensity = UiDensity.comfortable;
+    _cornerRadius = CornerRadius.standard;
+    _bubbleStyle = BubbleStyle.green;
+    notifyListeners();
+    final p = await SharedPreferences.getInstance();
+    await p.remove(_kSeed);
+    await p.setBool(_kDynamic, true);
+    await p.setInt(_kTheme, ThemePreference.system.index);
+    await p.setInt(_kDensity, UiDensity.comfortable.index);
+    await p.setInt(_kRadius, CornerRadius.standard.index);
+    await p.setInt(_kBubble, BubbleStyle.green.index);
   }
 }

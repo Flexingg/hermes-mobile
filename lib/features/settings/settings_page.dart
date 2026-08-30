@@ -6,6 +6,19 @@ import '../../core/theme/app_theme.dart';
 import '../../state/app_state.dart';
 import 'servers_page.dart';
 
+/// Selectable Material seed colors for the accent picker.
+const List<Color> _accentSwatches = [
+  Color(0xFF6750A4), // purple
+  Color(0xFF00695C), // teal
+  Color(0xFF1565C0), // blue
+  Color(0xFF2E7D32), // green
+  Color(0xFFEF6C00), // orange
+  Color(0xFFC2185B), // pink
+  Color(0xFFD32F2F), // red
+  Color(0xFF5D4037), // brown
+  Color(0xFF37474F), // blue grey
+];
+
 /// App settings: appearance (Material You), data mode, servers, about.
 class SettingsPage extends StatelessWidget {
   const SettingsPage({super.key});
@@ -50,29 +63,115 @@ class SettingsPage extends StatelessWidget {
                       ButtonSegment(value: ThemePreference.dark, icon: Icon(Icons.dark_mode_outlined)),
                     ],
                     selected: {config.themePreference},
-                    onSelectionChanged: (s) =>
-                        config.setThemePreference(s.first),
+                    onSelectionChanged: (s) => config.setThemePreference(s.first),
+                  ),
+                ),
+                const Divider(height: 1),
+                ListTile(
+                  leading: const Icon(Icons.space_dashboard_outlined),
+                  title: const Text('Density'),
+                  trailing: SegmentedButton<UiDensity>(
+                    segments: const [
+                      ButtonSegment(value: UiDensity.comfortable, label: Text('Comfy')),
+                      ButtonSegment(value: UiDensity.compact, label: Text('Compact')),
+                    ],
+                    selected: {config.uiDensity},
+                    onSelectionChanged: (s) => config.setUiDensity(s.first),
+                  ),
+                ),
+                const Divider(height: 1),
+                ListTile(
+                  leading: const Icon(Icons.rounded_corner),
+                  title: const Text('Corner radius'),
+                  trailing: SegmentedButton<CornerRadius>(
+                    style: ButtonStyle(visualDensity: VisualDensity.compact),
+                    segments: const [
+                      ButtonSegment(value: CornerRadius.standard, label: Text('Standard')),
+                      ButtonSegment(value: CornerRadius.sharp, label: Text('Sharp')),
+                      ButtonSegment(value: CornerRadius.rounded, label: Text('Rounded')),
+                    ],
+                    selected: {config.cornerRadius},
+                    onSelectionChanged: (s) => config.setCornerRadius(s.first),
+                  ),
+                ),
+                const Divider(height: 1),
+                ListTile(
+                  leading: const Icon(Icons.chat_bubble_outline),
+                  title: const Text('Sent bubble color'),
+                  trailing: SegmentedButton<BubbleStyle>(
+                    style: ButtonStyle(visualDensity: VisualDensity.compact),
+                    segments: const [
+                      ButtonSegment(value: BubbleStyle.theme, label: Text('Theme')),
+                      ButtonSegment(value: BubbleStyle.green, label: Text('Green')),
+                      ButtonSegment(value: BubbleStyle.blue, label: Text('Blue')),
+                    ],
+                    selected: {config.bubbleStyle},
+                    onSelectionChanged: (s) => config.setBubbleStyle(s.first),
+                  ),
+                ),
+                const Divider(height: 1),
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(16, 12, 16, 8),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Row(children: [
+                        Icon(Icons.color_lens_outlined,
+                            color: scheme.onSurfaceVariant),
+                        const SizedBox(width: 16),
+                        const Text('Accent color'),
+                        const Spacer(),
+                        if (config.seedColor != null)
+                          TextButton(
+                            onPressed: () => config.setSeedColor(null),
+                            child: const Text('Wallpaper'),
+                          ),
+                      ]),
+                      const SizedBox(height: 8),
+                      Wrap(
+                        spacing: 8,
+                        runSpacing: 8,
+                        children: [
+                          for (final c in _accentSwatches)
+                            InkWell(
+                              key: ValueKey(c),
+                              borderRadius: BorderRadius.circular(20),
+                              onTap: () {
+                                config.setDynamicColor(false);
+                                config.setSeedColor(c);
+                              },
+                              child: Container(
+                                width: 36,
+                                height: 36,
+                                decoration: BoxDecoration(
+                                  color: c,
+                                  shape: BoxShape.circle,
+                                  border: config.seedColor == c
+                                      ? Border.all(
+                                          color: scheme.onSurface, width: 3)
+                                      : null,
+                                ),
+                              ),
+                            ),
+                        ],
+                      ),
+                    ],
+                  ),
+                ),
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(12, 0, 12, 8),
+                  child: Align(
+                    alignment: Alignment.centerLeft,
+                    child: TextButton.icon(
+                      onPressed: () => config.resetAppearance(),
+                      icon: const Icon(Icons.restart_alt),
+                      label: const Text('Reset appearance'),
+                    ),
                   ),
                 ),
               ],
             ),
           ),
-          if (config.seedColor != null) ...[
-            const SizedBox(height: 8),
-            Card(
-              child: ListTile(
-                leading: Icon(Icons.color_lens_outlined,
-                    color: config.seedColor),
-                title: const Text('Custom accent active'),
-                subtitle: Text(
-                    '#${config.seedColor!.toARGB32().toRadixString(16).padLeft(8, '0')}'),
-                trailing: IconButton(
-                  icon: const Icon(Icons.close),
-                  onPressed: () => config.setSeedColor(null),
-                ),
-              ),
-            ),
-          ],
           const SizedBox(height: 20),
           Text('Connection', style: Theme.of(context).textTheme.titleMedium),
           const SizedBox(height: 8),

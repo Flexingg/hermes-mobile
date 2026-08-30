@@ -118,9 +118,10 @@ then **Connect & verify**. No data appears until the connection succeeds.
 ## 🗺️ Roadmap / next steps
 
 - ✅ **CI** — GitHub Actions: analyze/test on PR & main, debug APK artifact, and auto-publish release APK on version tags.
-- ✅ **Biometric vault** — app locks behind fingerprint/face/PIN on launch (local_auth + flutter_secure_storage).
+- ✅ **Biometric vault** — opt-in fingerprint/face/PIN lock (default off, recovery button on lock screen).
 - ✅ **Share transcript** — export a conversation via the system share sheet.
-- Wire FCM push + notification hub; home-screen widget.
-- Implement STT/TTS voice I/O and attachments.
-- Ship the Hermes bridge service (REST + WS) for `HermesRepository`.
-- Session stats charts; multi-agent orchestration (spawn/stop agents).
+- ✅ **Reply notifications** — opt-in local notifications when Hermes finishes replying.
+- ✅ **UI configuration** — accent color picker, density (comfy/compact), corner radius, sent-bubble color, theme mode, reset.
+- ⏳ FCM server-push (needs a Firebase `google-services.json`); notification hub.
+- Home-screen widget; STT/TTS voice I/O; attachments.
+- Session stats charts; multi-agent orchestration.

@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_markdown/flutter_markdown.dart';
+import '../../core/theme/app_theme.dart';
 import '../../core/util/format.dart';
 import '../../data/models.dart';
 import '../../widgets/common.dart';
@@ -46,9 +47,14 @@ class _SentBubble extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final dark = Theme.of(context).brightness == Brightness.dark;
-    final bubbleColor = dark ? const Color(0xFF2B2B2B) : const Color(0xFFE7FEDB);
-    final textColor = dark ? Colors.white : const Color(0xFF001C06);
+    final colors = Theme.of(context).extension<HermesColors>() ??
+        const HermesColors(
+            sentBubble: Color(0xFFE7FEDB),
+            sentBubbleText: Color(0xFF001C06),
+            receivedBubble: Colors.white);
+    final bubbleColor = colors.sentBubble;
+    final textColor = colors.sentBubbleText;
+    final r = colors.bubbleRadius;
 
     return Align(
       alignment: Alignment.centerRight,
@@ -57,11 +63,11 @@ class _SentBubble extends StatelessWidget {
         padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
         decoration: BoxDecoration(
           color: bubbleColor,
-          borderRadius: const BorderRadius.only(
-            topLeft: Radius.circular(18),
-            topRight: Radius.circular(6),
-            bottomLeft: Radius.circular(18),
-            bottomRight: Radius.circular(18),
+          borderRadius: BorderRadius.only(
+            topLeft: Radius.circular(r),
+            topRight: Radius.circular(r * 0.33),
+            bottomLeft: Radius.circular(r),
+            bottomRight: Radius.circular(r),
           ),
         ),
         child: Column(
@@ -104,9 +110,11 @@ class _ReceivedBubble extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
-    final bubbleColor = Theme.of(context).brightness == Brightness.dark
-        ? scheme.surfaceContainerHighest
-        : Colors.white;
+    final colors = Theme.of(context).extension<HermesColors>();
+    final bubbleColor = colors?.receivedBubble ??
+        (Theme.of(context).brightness == Brightness.dark
+            ? scheme.surfaceContainerHighest
+            : Colors.white);
     final isStreaming =
         message.status == ChatMessageStatus.streaming;
 
@@ -129,11 +137,11 @@ class _ReceivedBubble extends StatelessWidget {
               padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
               decoration: BoxDecoration(
                 color: bubbleColor,
-                borderRadius: const BorderRadius.only(
-                  topLeft: Radius.circular(6),
-                  topRight: Radius.circular(18),
-                  bottomLeft: Radius.circular(18),
-                  bottomRight: Radius.circular(18),
+                borderRadius: BorderRadius.only(
+                  topLeft: Radius.circular(colors?.bubbleRadius ?? 18 * 0.33),
+                  topRight: Radius.circular(colors?.bubbleRadius ?? 18),
+                  bottomLeft: Radius.circular(colors?.bubbleRadius ?? 18),
+                  bottomRight: Radius.circular(colors?.bubbleRadius ?? 18),
                 ),
               ),
               child: Column(
