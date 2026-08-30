@@ -444,6 +444,47 @@ def tools():
     ]
 
 
+@app.get("/api/v1/activity")
+def activity(session_id: str | None = None, limit: int = 60):
+    con = _db()
+    if session_id:
+        rows = con.execute(
+            """SELECT id, session_id, tool_name, content, timestamp
+               FROM messages WHERE role='tool' AND session_id=?
+               ORDER BY timestamp DESC LIMIT ?""",
+            (session_id, limit),
+        ).fetchall()
+    else:
+        rows = con.execute(
+            """SELECT id, session_id, tool_name, content, timestamp
+               FROM messages WHERE role='tool'
+               ORDER BY timestamp DESC LIMIT ?""",
+            (limit,),
+        ).fetchall()
+    con.close()
+    out = []
+    for r in rows:
+        status = "done"
+        snippet = ""
+        try:
+            data = json.loads(r["content"] or "{}")
+            if isinstance(data, dict):
+                if data.get("error"):
+                    status = "error"
+                snippet = json.dumps(data)[:140]
+        except Exception:
+            snippet = (r["content"] or "")[:140]
+        out.append({
+            "id": str(r["id"]),
+            "toolName": r["tool_name"] or "tool",
+            "status": status,
+            "detail": snippet,
+            "timestamp": _iso(r["timestamp"]),
+            "sessionId": r["session_id"],
+        })
+    return out
+
+
 @app.get("/api/v1/commands")
 def commands():
     return [

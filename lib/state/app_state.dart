@@ -87,14 +87,29 @@ class AppState extends ChangeNotifier {
     try {
       final s = await repo.serverStatus();
       status = s;
+      // Connection is verified by a live status response — this is what gates
+      // the app into the connected state. Individual data loads below must not
+      // undo it if a single endpoint is missing or errors.
       connected = true;
-      await loadAll();
     } catch (e) {
       connected = false;
-      error = e.toString();
-    } finally {
+      error = 'Could not reach server: $e';
       busy = false;
       notifyListeners();
+      return;
+    }
+    await loadAll(); // resilient: never throws, never disconnects
+    busy = false;
+    notifyListeners();
+  }
+
+  /// Runs a loader, swallowing errors so one failing endpoint can't abort the
+  /// rest or disconnect the app. Errors are surfaced via [error].
+  Future<void> _safe(Future<void> Function() job) async {
+    try {
+      await job();
+    } catch (e) {
+      error = e.toString();
     }
   }
 
@@ -217,17 +232,17 @@ class AppState extends ChangeNotifier {
     busy = true;
     notifyListeners();
     await Future.wait([
-      refreshServers(),
-      refreshSessions(),
-      loadCron(),
-      loadSkills(),
-      loadMemory(),
-      loadStatus(),
-      loadLogs(),
-      loadModels(),
-      loadActivities(),
-      loadCommands(),
-      loadWebhooks(),
+      _safe(refreshServers),
+      _safe(refreshSessions),
+      _safe(loadCron),
+      _safe(loadSkills),
+      _safe(loadMemory),
+      _safe(loadStatus),
+      _safe(loadLogs),
+      _safe(loadModels),
+      _safe(loadActivities),
+      _safe(loadCommands),
+      _safe(loadWebhooks),
     ]);
     busy = false;
     notifyListeners();
