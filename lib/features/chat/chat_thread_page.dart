@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
+import 'package:share_plus/share_plus.dart';
 import '../../data/models.dart';
 import '../../state/app_state.dart';
 import '../../widgets/common.dart';
@@ -220,12 +221,30 @@ class _ChatThreadPageState extends State<ChatThreadPage> {
     }
   }
 
-  void _share(BuildContext context, AppState state) {
+  Future<void> _share(BuildContext context, AppState state) async {
     final msgs = state.messagesFor(widget.sessionId);
-    final text = msgs.map((m) => m.text).where((t) => t.isNotEmpty).join('\n\n');
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(content: Text('Transcript (${text.length} chars) ready to share.')),
-    );
+    final session = _session(state);
+    final text = [
+      'Hermes conversation: ${session?.title ?? ''}',
+      '',
+      ...msgs.map((m) {
+        final who = switch (m.role) {
+          ChatMessageRole.user => 'You',
+          ChatMessageRole.assistant => 'Hermes',
+          _ => 'Tool',
+        };
+        return '$who:\n${m.text}';
+      }),
+    ].join('\n\n');
+    try {
+      await SharePlus.instance.share(ShareParams(text: text));
+    } catch (e) {
+      if (context.mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Could not share: $e')),
+        );
+      }
+    }
   }
 
   String? _emojiFor(String title) {

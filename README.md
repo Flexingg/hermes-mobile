@@ -99,8 +99,10 @@ flutter build apk --debug         # build a debug APK
 
 ## 🗺️ Roadmap / next steps
 
-- Wire FCM push + notification hub; biometric vault; home-screen widget.
+- ✅ **CI** — GitHub Actions: analyze/test on PR & main, debug APK artifact, and auto-publish release APK on version tags.
+- ✅ **Biometric vault** — app locks behind fingerprint/face/PIN on launch (local_auth + flutter_secure_storage).
+- ✅ **Share transcript** — export a conversation via the system share sheet.
+- Wire FCM push + notification hub; home-screen widget.
 - Implement STT/TTS voice I/O and attachments.
 - Ship the Hermes bridge service (REST + WS) for `HermesRepository`.
 - Session stats charts; multi-agent orchestration (spawn/stop agents).
-- CI (GitHub Actions) building a release APK on tag.

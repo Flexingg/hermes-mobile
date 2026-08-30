@@ -110,11 +110,20 @@ class SettingsPage extends StatelessWidget {
                 SwitchListTile(
                   secondary: const Icon(Icons.lock_outline),
                   title: const Text('Biometric vault'),
-                  subtitle: const Text('Lock tokens & keys with your fingerprint'),
-                  value: false,
-                  onChanged: (_) => ScaffoldMessenger.of(context).showSnackBar(
-                    const SnackBar(content: Text('Vault wiring lands with push/notifications step.')),
-                  ),
+                  subtitle: const Text(
+                      'Lock the app with your fingerprint / face / PIN on launch'),
+                  value: config.vaultEnabled,
+                  onChanged: (v) async {
+                    await config.setVaultEnabled(v);
+                    if (!context.mounted) return;
+                    if (v) {
+                      ScaffoldMessenger.of(context).showSnackBar(
+                        const SnackBar(
+                            content: Text(
+                                'Vault enabled — app will lock on next launch.')),
+                      );
+                    }
+                  },
                 ),
               ],
             ),
