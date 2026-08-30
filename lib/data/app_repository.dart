@@ -16,6 +16,12 @@ abstract class AppRepository {
   Future<List<ChatSession>> sessions();
   Future<List<ChatMessage>> messages(String sessionId);
   Future<ChatSession> createSession(String title, String profileId);
+  /// Starts a real new conversation: the bridge runs `hermes chat` to create a
+  /// genuine session and returns it (first message already sent).
+  Future<ChatSession> startNewChat({
+    required String name,
+    required String text,
+  });
   /// Sends a message and returns a stream of the assistant reply as it streams.
   Stream<ChatMessage> sendMessage(String sessionId, String text);
   Future<void> markRead(String sessionId);

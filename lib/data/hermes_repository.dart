@@ -98,6 +98,15 @@ class HermesRepository implements AppRepository {
   }
 
   @override
+  Future<ChatSession> startNewChat({
+    required String name,
+    required String text,
+  }) async {
+    final data = await _post('/api/v1/chat/start', {'name': name, 'text': text});
+    return _sessionFromJson(data as Map<String, dynamic>);
+  }
+
+  @override
   Stream<ChatMessage> sendMessage(String sessionId, String text) async* {
     // 1) Persist the user message.
     await _post('/api/v1/sessions/$sessionId/messages', {'text': text});
@@ -369,26 +378,38 @@ class HermesRepository implements AppRepository {
       };
 
   ChatSession _sessionFromJson(Map<String, dynamic> j) => ChatSession(
-        id: j['id'],
-        title: j['title'],
-        lastPreview: j['lastPreview'] ?? '',
-        lastTimestamp: DateTime.parse(j['lastTimestamp']),
-        unreadCount: j['unreadCount'] ?? 0,
-        pinned: j['pinned'] ?? false,
-        starred: j['starred'] ?? false,
-        profileId: j['profileId'] ?? '',
+        id: (j['id'] ?? '').toString(),
+        title: (j['title'] ?? 'Conversation').toString(),
+        lastPreview: j['lastPreview']?.toString() ?? '',
+        lastTimestamp: _dt(j['lastTimestamp']),
+        unreadCount: (j['unreadCount'] as num?)?.toInt() ?? 0,
+        pinned: j['pinned'] == true,
+        starred: j['starred'] == true,
+        profileId: (j['profileId'] ?? '').toString(),
         avatarColor: _color(j['color']),
       );
 
   ChatMessage _messageFromJson(Map<String, dynamic> j) => ChatMessage(
-        id: j['id'],
-        sessionId: j['sessionId'],
+        id: (j['id'] ?? '').toString(),
+        sessionId: (j['sessionId'] ?? '').toString(),
         role: ChatMessageRole.values.asNameMap()[j['role']] ??
             ChatMessageRole.user,
-        text: j['text'] ?? '',
-        timestamp: DateTime.parse(j['timestamp']),
-        toolName: j['toolName'],
+        text: j['text']?.toString() ?? '',
+        timestamp: _dt(j['timestamp']),
+        toolName: j['toolName']?.toString(),
       );
+
+  /// Tolerant date parse — never throws on missing/malformed timestamps
+  /// (a single bad row must not break the whole list).
+  DateTime _dt(dynamic v) {
+    if (v is String) {
+      final d = DateTime.tryParse(v);
+      if (d != null) return d;
+    } else if (v is num) {
+      return DateTime.fromMillisecondsSinceEpoch(v.round());
+    }
+    return DateTime.now();
+  }
 
   CronJob _cronFromJson(Map<String, dynamic> j) => CronJob(
         id: j['id'],

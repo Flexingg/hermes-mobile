@@ -95,14 +95,44 @@ class _NewChatSheetState extends State<NewChatSheet> {
     final text = _controller.text.trim();
     if (text.isEmpty) return;
     Navigator.of(context).pop(); // close sheet
-    final session = await state.repo
-        .createSession(bot.name, bot.id);
-    await state.refreshSessions();
-    await state.openSession(session.id);
-    await state.sendMessage(text);
-    if (!mounted) return;
-    Navigator.of(context).push(
-      MaterialPageRoute(builder: (_) => ChatThreadPage(sessionId: session.id)),
+
+    // Show a blocking progress dialog while Hermes spins up a real session.
+    showDialog<void>(
+      context: context,
+      barrierDismissible: false,
+      builder: (_) => const Center(
+        child: Card(
+          child: Padding(
+            padding: EdgeInsets.all(20),
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                CircularProgressIndicator(),
+                SizedBox(width: 16),
+                Text('Starting conversation…'),
+              ],
+            ),
+          ),
+        ),
+      ),
     );
+    try {
+      final session =
+          await state.repo.startNewChat(name: bot.name, text: text);
+      if (!mounted) return;
+      Navigator.of(context).pop(); // close progress dialog
+      await state.refreshSessions();
+      await state.openSession(session.id);
+      if (!mounted) return;
+      Navigator.of(context).push(
+        MaterialPageRoute(builder: (_) => ChatThreadPage(sessionId: session.id)),
+      );
+    } catch (e) {
+      if (!mounted) return;
+      Navigator.of(context).pop(); // close progress dialog
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Could not start chat: $e')),
+      );
+    }
   }
 }

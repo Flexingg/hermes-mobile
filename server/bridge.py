@@ -27,7 +27,7 @@ import time
 from pathlib import Path
 
 import psutil
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from starlette.requests import Request
 from starlette.responses import JSONResponse
@@ -43,6 +43,8 @@ PROFILES_DIR = HERMES / "profiles"
 
 # Optional bearer token. When set, every /api/v1/* call must send it.
 BRIDGE_TOKEN = os.environ.get("BRIDGE_TOKEN")
+# Absolute path to the `hermes` CLI (systemd services don't inherit ~/.local/bin).
+HERMES_BIN = os.environ.get("HERMES_BIN", "/home/hermes/.local/bin/hermes")
 
 app = FastAPI(title="Hermes Mobile bridge", version="1.0")
 app.add_middleware(
@@ -144,7 +146,7 @@ def status():
     con.close()
     version = ""
     try:
-        out = subprocess.run(["hermes", "--version"], capture_output=True, text=True, timeout=10)
+        out = subprocess.run([HERMES_BIN, "--version"], capture_output=True, text=True, timeout=10)
         version = (out.stdout or out.stderr).strip().splitlines()[0]
     except Exception:
         version = "hermes"
@@ -173,8 +175,8 @@ def _gateway_up() -> bool:
 def sessions():
     con = _db()
     rows = con.execute(
-        """SELECT id, title, display_name, last_activity_at, last_activity_description,
-                  message_count, pinned, source
+        """SELECT id, title, display_name, last_activity_at, started_at,
+                  last_activity_description, message_count, pinned, source
            FROM sessions WHERE archived=0 AND hidden=0
            ORDER BY last_activity_at DESC LIMIT 200"""
     ).fetchall()
@@ -182,12 +184,13 @@ def sessions():
     out = []
     for r in rows:
         title = r["title"] or r["display_name"] or r["source"] or "Conversation"
+        ts = r["last_activity_at"] or r["started_at"] or _now()
         out.append(
             {
                 "id": r["id"],
                 "title": title,
                 "lastPreview": (r["last_activity_description"] or "")[:140],
-                "lastTimestamp": _iso(r["last_activity_at"]),
+                "lastTimestamp": _iso(ts),
                 "unreadCount": 0,
                 "pinned": bool(r["pinned"]),
                 "starred": False,
@@ -267,6 +270,40 @@ def create_session(body: dict):
     }
 
 
+@app.post("/api/v1/chat/start")
+def chat_start(body: dict):
+    """Start a REAL new Hermes conversation: runs `hermes chat -q <text>` (which
+    creates a genuine session), parses the returned session id, and returns it."""
+    text = (body.get("text") or "").strip()
+    if not text:
+        raise HTTPException(status_code=400, detail="text required")
+    try:
+        p = subprocess.run(
+            [HERMES_BIN, "chat", "-q", text, "--pass-session-id"],
+            capture_output=True, text=True, timeout=180,
+        )
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"hermes failed: {e}")
+    out = (p.stdout or "") + "\n" + (p.stderr or "")
+    m = re.search(r"Session:\s+([0-9A-Za-z_]+)", out)
+    sid = m.group(1) if m else None
+    tm = re.search(r"Title:\s*(.+)", out)
+    title = (tm.group(1).strip() if tm else body.get("name") or text)[:200]
+    if not sid:
+        raise HTTPException(status_code=502, detail="could not determine new session id")
+    return {
+        "id": sid,
+        "title": title,
+        "lastPreview": text[:140],
+        "lastTimestamp": _iso(_now()),
+        "unreadCount": 0,
+        "pinned": False,
+        "starred": False,
+        "profileId": "hermes",
+        "color": _hash_color(sid),
+    }
+
+
 @app.post("/api/v1/sessions/{session_id}/messages")
 def send_message(session_id: str, body: dict):
     text = (body.get("text") or "").strip()
@@ -278,7 +315,7 @@ def send_message(session_id: str, body: dict):
 
 def _spawn_hermes(session_id: str, text: str) -> None:
     def run():
-        cmd = ["hermes", "chat", "-q", text, "--resume", session_id]
+        cmd = [HERMES_BIN, "chat", "-q", text, "--resume", session_id]
         proc = subprocess.Popen(
             cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True
         )
@@ -376,7 +413,7 @@ def cron():
 
 @app.post("/api/v1/cron/{job_id}/run")
 def run_cron(job_id: str):
-    subprocess.Popen(["hermes", "cron", "run", job_id], stdout=subprocess.DEVNULL,
+    subprocess.Popen([HERMES_BIN, "cron", "run", job_id], stdout=subprocess.DEVNULL,
                      stderr=subprocess.DEVNULL)
     return {"ok": True}
 
