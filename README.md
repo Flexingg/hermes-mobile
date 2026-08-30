@@ -1,4 +1,4 @@
-# Hermes Mobile
+# Mercury Messenger
 
 A **Material You / Material Expressive** Flutter chat interface **and controller** for
 [Hermes Agent](https://hermes-agent.nousresearch.com), optimized for Android. The UI is styled to feel
@@ -120,8 +120,8 @@ then **Connect & verify**. No data appears until the connection succeeds.
 - ✅ **CI** — GitHub Actions: analyze/test on PR & main, debug APK artifact, and auto-publish release APK on version tags.
 - ✅ **Biometric vault** — opt-in fingerprint/face/PIN lock (default off, recovery button on lock screen).
 - ✅ **Share transcript** — export a conversation via the system share sheet.
-- ✅ **Reply notifications** — opt-in local notifications when Hermes finishes replying.
+- ✅ **Reply notifications** — opt-in push when Hermes finishes replying (FCM).
+- ✅ **Firebase push** — FCM client + bridge sender; opt-in, deep-links into the chat.
 - ✅ **UI configuration** — accent color picker, density (comfy/compact), corner radius, sent-bubble color, theme mode, reset.
-- ⏳ FCM server-push (needs a Firebase `google-services.json`); notification hub.
-- Home-screen widget; STT/TTS voice I/O; attachments.
+- ⏳ Notification hub (per-event push controls); home-screen widget.
 - Session stats charts; multi-agent orchestration.
