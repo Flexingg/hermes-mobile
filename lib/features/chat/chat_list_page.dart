@@ -6,6 +6,7 @@ import '../../data/models.dart';
 import '../../state/app_state.dart';
 import '../../widgets/common.dart';
 import '../settings/servers_page.dart';
+import '../terminal/terminal_page.dart';
 import 'chat_thread_page.dart';
 import 'group_chat_page.dart';
 import 'new_chat_sheet.dart';
@@ -28,6 +29,13 @@ class ChatListPage extends StatelessWidget {
             tooltip: 'Search',
             onPressed: () => Navigator.of(context).push(
               MaterialPageRoute(builder: (_) => const SearchPage()),
+            ),
+          ),
+          IconButton(
+            icon: const Icon(Icons.terminal_rounded),
+            tooltip: 'Host terminal',
+            onPressed: () => Navigator.of(context).push(
+              MaterialPageRoute(builder: (_) => const TerminalPage()),
             ),
           ),
           Padding(

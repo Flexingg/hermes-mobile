@@ -984,6 +984,65 @@ def trigger_webhook(webhook_id: str):
     return {"ok": True}
 
 
+# ---------------------------------------------------------------------------
+# Remote terminal: run commands on the host PC from the app.
+# Gated by the bearer-token middleware above. Optional kill-switch via the
+# ENABLE_TERMINAL env var (default "1"). Commands run as the hermes user.
+# ---------------------------------------------------------------------------
+TERMINAL_DIR = Path(os.environ.get("TERMINAL_CWD", str(HERMES)))
+ENABLE_TERMINAL = os.environ.get("ENABLE_TERMINAL", "1") == "1"
+
+
+@app.post("/api/v1/terminal/run")
+def terminal_run(body: dict):
+    """Run a shell command on the host and return its output."""
+    if not ENABLE_TERMINAL:
+        raise HTTPException(status_code=403, detail="remote terminal disabled")
+    command = (body.get("command") or "").strip()
+    if not command:
+        raise HTTPException(status_code=400, detail="command required")
+    if len(command) > 8000:
+        raise HTTPException(status_code=400, detail="command too long")
+    cwd_raw = (body.get("cwd") or "").strip()
+    timeout = max(1, min(int(body.get("timeout") or 300), 1800))
+    if not cwd_raw:
+        cwd_path = TERMINAL_DIR.resolve()
+    else:
+        try:
+            cwd_path = Path(cwd_raw).expanduser().resolve()
+            if not cwd_path.is_dir():
+                cwd_path = TERMINAL_DIR.resolve()
+        except Exception:
+            cwd_path = TERMINAL_DIR.resolve()
+    start = time.time()
+    try:
+        p = subprocess.run(
+            command, shell=True, cwd=str(cwd_path), capture_output=True,
+            text=True, timeout=timeout,
+        )
+        return {
+            "command": command,
+            "cwd": str(cwd_path),
+            "stdout": p.stdout or "",
+            "stderr": p.stderr or "",
+            "exitCode": p.returncode,
+            "durationMs": int((time.time() - start) * 1000),
+            "timedOut": False,
+        }
+    except subprocess.TimeoutExpired:
+        return {
+            "command": command,
+            "cwd": str(cwd_path),
+            "stdout": "",
+            "stderr": f"Command timed out after {timeout}s",
+            "exitCode": -1,
+            "durationMs": timeout * 1000,
+            "timedOut": True,
+        }
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(status_code=500, detail=f"failed: {e}")
+
+
 @app.get("/healthz")
 def healthz():
     return {"ok": True, "hermes": str(HERMES), "db": STATE_DB.exists()}

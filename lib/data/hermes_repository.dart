@@ -118,6 +118,34 @@ class HermesRepository implements AppRepository {
     await _post('/api/v1/devices/test', {'title': ?title, 'message': ?message});
   }
 
+  @override
+  Future<TerminalResult> runCommand(String command,
+      {String? cwd, int? timeout}) async {
+    final uri = Uri.parse('$baseUrl/api/v1/terminal/run');
+    final res = await _client
+        .post(uri,
+            headers: _headers,
+            body: jsonEncode({
+              'command': command,
+              'cwd': cwd ?? '',
+              'timeout': timeout ?? 300,
+            }))
+        .timeout(Duration(seconds: (timeout ?? 300) + 30));
+    if (res.statusCode >= 400) {
+      throw Exception('POST /terminal/run → ${res.statusCode}: ${res.body}');
+    }
+    final d = jsonDecode(res.body) as Map<String, dynamic>;
+    return TerminalResult(
+      command: d['command']?.toString() ?? command,
+      cwd: d['cwd']?.toString() ?? cwd ?? '',
+      stdout: d['stdout']?.toString() ?? '',
+      stderr: d['stderr']?.toString() ?? '',
+      exitCode: (d['exitCode'] as num?)?.toInt() ?? -1,
+      durationMs: (d['durationMs'] as num?)?.toInt() ?? 0,
+      timedOut: d['timedOut'] == true,
+    );
+  }
+
   /// Strips `MEDIA:<path>` references from agent text and turns them into
   /// downloadable attachments, so files the agent hands over render as chips
   /// in real-time during streaming (not only after a reload). Dedupes by path.

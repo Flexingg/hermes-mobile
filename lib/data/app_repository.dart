@@ -56,6 +56,11 @@ abstract class AppRepository {
   Future<void> registerDevice(String token);
   Future<void> sendTestPush({String? title, String? message});
 
+  // ---- Remote terminal ----------------------------------------------
+  /// Runs a command on the host PC and returns its output.
+  Future<TerminalResult> runCommand(String command,
+      {String? cwd, int? timeout});
+
   // ---- Cron jobs -----------------------------------------------------
   Future<List<CronJob>> cronJobs();
   Future<CronJob> createCronJob(CronJob job);

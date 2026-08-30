@@ -273,6 +273,28 @@ class ToolActivity {
   });
 }
 
+/// Result of a command run on the host PC via the remote terminal.
+class TerminalResult {
+  final String command;
+  final String cwd;
+  final String stdout;
+  final String stderr;
+  final int exitCode;
+  final int durationMs;
+  final bool timedOut;
+  const TerminalResult({
+    required this.command,
+    required this.cwd,
+    required this.stdout,
+    required this.stderr,
+    required this.exitCode,
+    required this.durationMs,
+    required this.timedOut,
+  });
+
+  String get combined => stdout.isNotEmpty ? '$stdout\n$stderr' : stderr;
+}
+
 /// Server / gateway health snapshot.
 class ServerStatus {
   final double cpu;
