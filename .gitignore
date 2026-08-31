@@ -49,3 +49,6 @@ app.*.map.json
 
 # Local finance exports / sensitive data — never commit
 server/data/
+
+# UI design scratch
+sketches/
