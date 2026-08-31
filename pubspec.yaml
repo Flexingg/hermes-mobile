@@ -57,6 +57,7 @@ dependencies:
   file_picker: ^8.1.2
   speech_to_text: ^7.4.0
   path: ^1.9.1
+  webview_flutter: ^4.14.1
 
 dev_dependencies:
   flutter_test:

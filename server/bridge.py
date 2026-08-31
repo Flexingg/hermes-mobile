@@ -685,6 +685,25 @@ def get_file(path: str = ""):
     return FileResponse(p, filename=p.name, media_type="application/octet-stream")
 
 
+@app.get("/html/{path:path}")
+def html_preview(path: str):
+    """Serve an HTML/CSS/JS/image preview to the app's in-app WebView.
+
+    Deliberately OUTSIDE /api/v1 so it needs no auth header (a WebView can't
+    attach one), and the URL mirrors the real file path so relative asset
+    references (./style.css, images, scripts) resolve naturally. Only serves
+    preview-safe content types from the allowed roots.
+    """
+    # {path:path} strips the leading '/', so rebuild an absolute filesystem path.
+    p = Path("/" + path.lstrip("/")).expanduser().resolve()
+    if not any(_is_within(p, root) for root in _file_roots()):
+        raise HTTPException(status_code=403, detail="path outside allowed roots")
+    if not p.is_file():
+        raise HTTPException(status_code=404, detail="not found")
+    ctype = _PREVIEW_TYPES.get(p.suffix.lower(), "application/octet-stream")
+    return FileResponse(p, media_type=ctype)
+
+
 @app.get("/api/v1/groups")
 def groups():
     return [

@@ -18,7 +18,7 @@ class Attachment {
   final String mimeType;
   final int? sizeBytes;
   final String? path; // server path (uploads / agent-produced) for sending + download
-  final String? kind; // 'image' | 'file'
+  final String? kind; // 'image' | 'file' | 'html'
   final String? localPath; // local cached copy (for previews)
   const Attachment({
     required this.name,
@@ -29,6 +29,10 @@ class Attachment {
     this.kind,
     this.localPath,
   });
+
+  bool get isHtml =>
+      kind == 'html' || name.toLowerCase().endsWith('.html') ||
+      name.toLowerCase().endsWith('.htm');
 }
 
 class ChatMessage {

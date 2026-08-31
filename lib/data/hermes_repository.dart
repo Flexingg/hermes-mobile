@@ -179,17 +179,47 @@ class HermesRepository implements AppRepository {
       final p = (m.group(1) ?? '').trim();
       if (p.isNotEmpty && seen.add(p)) {
         final name = p.split('/').last;
+        final isHtml = name.toLowerCase().endsWith('.html') ||
+            name.toLowerCase().endsWith('.htm');
         attachments.add(Attachment(
           name: name.isEmpty ? 'file' : name,
           url: p,
-          mimeType: 'application/octet-stream',
+          mimeType: isHtml
+              ? 'text/html'
+              : 'application/octet-stream',
           path: p,
-          kind: 'file',
+          kind: isHtml ? 'html' : 'file',
         ));
       }
       return '';
     }).trim();
     return (text: cleaned, attachments: attachments);
+  }
+
+  /// Web URL that serves an agent-produced file as an in-app preview (HTML/CSS/
+  /// JS/images render interactively; relative assets resolve against the real
+  /// file path on the bridge).
+  @override
+  String previewUrl(String filePath) {
+    final segs = filePath
+        .split('/')
+        .where((s) => s.isNotEmpty)
+        .map((s) => Uri.encodeComponent(s))
+        .join('/');
+    return '$baseUrl/html/$segs';
+  }
+
+  Attachment _attachmentFromJson(Map<String, dynamic> m) {
+    final name = m['name']?.toString() ?? 'file';
+    final isHtml = name.toLowerCase().endsWith('.html') ||
+        name.toLowerCase().endsWith('.htm');
+    return Attachment(
+      name: name,
+      url: m['path']?.toString() ?? '',
+      mimeType: isHtml ? 'text/html' : 'application/octet-stream',
+      path: m['path']?.toString(),
+      kind: m['kind']?.toString() ?? (isHtml ? 'html' : 'file'),
+    );
   }
 
   @override
@@ -395,13 +425,7 @@ class HermesRepository implements AppRepository {
         agent: j['agent']?.toString(),
         attachments: (j['media'] as List? ?? [])
             .whereType<Map<String, dynamic>>()
-            .map((m) => Attachment(
-                  name: m['name']?.toString() ?? 'file',
-                  url: m['path']?.toString() ?? '',
-                  mimeType: 'application/octet-stream',
-                  path: m['path']?.toString(),
-                  kind: 'file',
-                ))
+            .map((m) => _attachmentFromJson(m))
             .toList(),
       );
 
@@ -737,13 +761,7 @@ class HermesRepository implements AppRepository {
         toolName: j['toolName']?.toString(),
         attachments: (j['media'] as List? ?? [])
             .whereType<Map<String, dynamic>>()
-            .map((m) => Attachment(
-                  name: m['name']?.toString() ?? 'file',
-                  url: m['path']?.toString() ?? '',
-                  mimeType: 'application/octet-stream',
-                  path: m['path']?.toString(),
-                  kind: 'file',
-                ))
+            .map((m) => _attachmentFromJson(m))
             .toList(),
       );
 

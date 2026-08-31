@@ -9,6 +9,7 @@ import '../../core/util/format.dart';
 import '../../data/models.dart';
 import '../../state/app_state.dart';
 import '../../widgets/common.dart';
+import 'html_preview_page.dart';
 
 /// A single chat bubble, styled like Google Messages:
 ///  - sent (user) → tinted bubble, right-aligned, tight corner top-right
@@ -206,8 +207,8 @@ class _ReceivedBubble extends StatelessWidget {
                     ),
                   if (message.attachments.isNotEmpty) ...[
                     const SizedBox(height: 6),
-                    ...message.attachments
-                        .map((a) => _DownloadChip(attachment: a)),
+                    ...message.attachments.map(
+                        (a) => a.isHtml ? _HtmlPreviewCard(attachment: a) : _DownloadChip(attachment: a)),
                   ],
                   const SizedBox(height: 2),
                   Text(formatClock(message.timestamp),
@@ -445,6 +446,68 @@ class _DownloadChip extends StatelessWidget {
         );
       }
     }
+  }
+}
+
+class _HtmlPreviewCard extends StatelessWidget {
+  final Attachment attachment;
+  const _HtmlPreviewCard({required this.attachment});
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    final path = attachment.path;
+    return InkWell(
+      borderRadius: BorderRadius.circular(10),
+      onTap: () {
+        if (path == null) return;
+        final url = context.read<AppState>().repo.previewUrl(path);
+        Navigator.of(context).push(MaterialPageRoute(
+          builder: (_) =>
+              HtmlPreviewPage(attachment: attachment, url: url),
+        ));
+      },
+      child: Container(
+        width: 260,
+        padding: const EdgeInsets.all(10),
+        decoration: BoxDecoration(
+          color: scheme.surfaceContainerHighest.withValues(alpha: 0.6),
+          borderRadius: BorderRadius.circular(10),
+          border: Border.all(color: scheme.primary.withValues(alpha: 0.4)),
+        ),
+        child: Row(
+          children: [
+            Container(
+              width: 34,
+              height: 34,
+              decoration: BoxDecoration(
+                color: scheme.primary.withValues(alpha: 0.15),
+                borderRadius: BorderRadius.circular(8),
+              ),
+              child: Icon(Icons.travel_explore, size: 20, color: scheme.primary),
+            ),
+            const SizedBox(width: 10),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(attachment.name,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(
+                          fontSize: 13, fontWeight: FontWeight.w600)),
+                  Text('Interactive preview · tap to open',
+                      style: TextStyle(
+                          fontSize: 11,
+                          color: scheme.onSurfaceVariant)),
+                ],
+              ),
+            ),
+            Icon(Icons.chevron_right, size: 18, color: scheme.onSurfaceVariant),
+          ],
+        ),
+      ),
+    );
   }
 }
 

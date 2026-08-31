@@ -34,6 +34,10 @@ abstract class AppRepository {
   /// Downloads a file from the bridge by path, streaming it to a local temp
   /// file. Returns the local file path on the device.
   Future<String> downloadFile(String serverPath);
+
+  /// Web URL that serves an agent-produced file as an in-app preview
+  /// (HTML/CSS/JS render interactively; relative assets resolve on the bridge).
+  String previewUrl(String filePath);
   Future<void> markRead(String sessionId);
   Future<void> togglePinned(String sessionId);
   Future<void> toggleStarred(String sessionId);
