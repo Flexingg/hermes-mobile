@@ -181,7 +181,17 @@ class HermesRepository implements AppRepository {
   @override
   Stream<ChatMessage> sendMessage(String sessionId, String text,
       {List<Attachment> attachments = const []}) async* {
-    // 1) Persist the user message.
+    // 1) Connect the WebSocket FIRST so the bridge's per-session queue is
+    //    registered before we trigger hermes. Otherwise a fast reply's chunks
+    //    and "done" are broadcast to no listener and are lost — the UI then
+    //    never updates until the app is restarted.
+    final wsUrl = baseUrl
+        .replaceFirst('http', 'ws')
+        .replaceFirst('https', 'wss');
+    final channel = WebSocketChannel.connect(
+        Uri.parse('$wsUrl/ws/chat/$sessionId'));
+
+    // 2) Persist the user message (this spawns hermes on the bridge).
     await _post('/api/v1/sessions/$sessionId/messages', {
       'text': text,
       'attachments': attachments
@@ -190,14 +200,9 @@ class HermesRepository implements AppRepository {
           .toList(),
     });
 
-    // 2) Stream the assistant reply over WebSocket. Hermes' CLI output is
+    // 3) Stream the assistant reply over WebSocket. Hermes' CLI output is
     //    divided by the bridge into answer / thinking / technical chunks; we
     //    render each phase as its own bubble (stable id per phase).
-    final wsUrl = baseUrl
-        .replaceFirst('http', 'ws')
-        .replaceFirst('https', 'wss');
-    final channel = WebSocketChannel.connect(
-        Uri.parse('$wsUrl/ws/chat/$sessionId'));
     final baseId = 'live-${DateTime.now().millisecondsSinceEpoch}';
     final accs = {'answer': '', 'thinking': '', 'technical': ''};
     String? curType;
@@ -363,10 +368,12 @@ class HermesRepository implements AppRepository {
 
   @override
   Stream<ChatMessage> sendGroupMessage(String gid, String text) async* {
-    await _post('/api/v1/groups/$gid/messages', {'text': text});
+    // Connect the WS first so the bridge's queue is registered before the
+    // fan-out starts (same fast-reply race as sendMessage).
     final wsUrl = baseUrl.replaceFirst('http', 'ws').replaceFirst('https', 'wss');
     final channel =
         WebSocketChannel.connect(Uri.parse('$wsUrl/ws/group/$gid'));
+    await _post('/api/v1/groups/$gid/messages', {'text': text});
     final acc = <String, String>{};
     try {
       await for (final raw in channel.stream) {

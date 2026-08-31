@@ -1,10 +1,10 @@
 [Unit]
 Description=Hermes Mobile bridge (fronts real Hermes for the Flutter app)
-# Start after the network and the Hermes gateway are up. PartOf= means a
-# gateway restart also restarts this bridge (stays in sync).
+# Start after the network and the Hermes gateway are up. NOTE: deliberately
+# NOT PartOf= the gateway — the bridge is independent, and tying it to the
+# gateway means a gateway restart would tear down in-flight chats.
 Wants=network.target hermes-gateway.service
 After=network.target hermes-gateway.service
-PartOf=hermes-gateway.service
 
 [Service]
 Type=simple

@@ -1,0 +1,86 @@
+[
+  {
+    "id": "37f0b472-8826-4237-9bd1-d9436edc5929",
+    "category": "Transportation",
+    "updatedAt": 1788010368,
+    "maxAmount": null,
+    "priority": 2,
+    "minAmount": null,
+    "subCategory": "Car Insurance",
+    "pattern": "PROG NORTHERN",
+    "isActive": true,
+    "name": "PROG NORTHERN"
+  },
+  {
+    "id": "42317c69-132c-4c31-8b68-cf2f8e91150f",
+    "pattern": "WF CREDIT CARD",
+    "priority": 5,
+    "category": "Financial Transactions",
+    "name": "WF CREDIT CARD",
+    "isActive": true,
+    "minAmount": null,
+    "updatedAt": 1788010368,
+    "maxAmount": null,
+    "subCategory": "Credit Card Payment"
+  },
+  {
+    "id": "5f18f425-f6f6-432b-b06e-c2f56885ba28",
+    "isActive": true,
+    "pattern": "AMAZON",
+    "name": "AMAZON",
+    "category": "Personal & Lifestyle",
+    "priority": 4,
+    "minAmount": null,
+    "subCategory": "Shopping",
+    "updatedAt": 1788010368,
+    "maxAmount": null
+  },
+  {
+    "id": "c253029e-6c5a-4683-822d-734975e73303",
+    "updatedAt": 1788010368,
+    "maxAmount": null,
+    "pattern": "Spotify",
+    "minAmount": null,
+    "subCategory": "Subscriptions",
+    "priority": 3,
+    "category": "Personal & Lifestyle",
+    "name": "Spotify",
+    "isActive": true
+  },
+  {
+    "id": "d00ab0cc-2e4d-4142-add9-d4d28beb439e",
+    "updatedAt": 1788010368,
+    "maxAmount": null,
+    "pattern": "DEEPSEEK|DEEPSEERWEA",
+    "minAmount": null,
+    "subCategory": "Fun Money",
+    "name": "DEEPSEEK|DEEPSEERWEA",
+    "category": "Personal & Lifestyle",
+    "priority": 7,
+    "isActive": true
+  },
+  {
+    "id": "d59faf11-eb50-4fbd-8108-235026252061",
+    "name": "TMOBILE|T-MOBILE",
+    "updatedAt": 1788010368,
+    "maxAmount": null,
+    "pattern": "TMOBILE|T-MOBILE",
+    "minAmount": null,
+    "priority": 6,
+    "category": "Housing",
+    "subCategory": "Utilities",
+    "isActive": true
+  },
+  {
+    "id": "eb5825a5-0504-4e8e-a619-f6d3243a7c67",
+    "category": "Housing",
+    "name": "BREEZY HILL",
+    "priority": 1,
+    "maxAmount": null,
+    "updatedAt": 1788010368,
+    "minAmount": null,
+    "subCategory": "Utilities",
+    "isActive": true,
+    "pattern": "BREEZY HILL"
+  }
+]

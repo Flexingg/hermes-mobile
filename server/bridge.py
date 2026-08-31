@@ -453,7 +453,8 @@ def _run_group_agent(gid: str, agent: str, text: str) -> None:
     acc = ""
     try:
         proc = subprocess.Popen(
-            cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True
+            cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+            stdin=subprocess.DEVNULL, start_new_session=True,
         )
         if proc.stdout is not None:
             state = {"thinking": False}
@@ -578,8 +579,12 @@ def _spawn_hermes(session_id: str, text: str, attachments: list | None = None) -
         cmd = [HERMES_BIN, "chat", "-q", query, "--resume", session_id]
         if img_path:
             cmd += ["--image", img_path]
+        # start_new_session: run hermes in its own process group/session so
+        # stray SIGHUP/SIGTERM sent to the bridge's group can't interrupt the
+        # in-flight model call. stdin=/dev/null: no inherited terminal.
         proc = subprocess.Popen(
-            cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True
+            cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+            stdin=subprocess.DEVNULL, start_new_session=True,
         )
         state = {"thinking": False}
         if proc.stdout is not None:

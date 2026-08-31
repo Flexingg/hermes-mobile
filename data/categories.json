@@ -1,0 +1,60 @@
+[
+  {
+    "mainCategory": "Housing",
+    "subCategories": [
+      "Rent / Mortgage",
+      "Utilities",
+      "Maintenance",
+      "Insurance"
+    ]
+  },
+  {
+    "mainCategory": "Food & Dining",
+    "subCategories": [
+      "Groceries",
+      "Restaurants",
+      "Coffee Shops",
+      "Delivery"
+    ]
+  },
+  {
+    "mainCategory": "Transportation",
+    "subCategories": [
+      "Fuel",
+      "Car Payment",
+      "Public Transit",
+      "Auto Repairs"
+    ]
+  },
+  {
+    "mainCategory": "Income",
+    "subCategories": [
+      "Salary & Wages",
+      "Freelance",
+      "Investments",
+      "Refunds"
+    ]
+  },
+  {
+    "mainCategory": "Personal & Lifestyle",
+    "subCategories": [
+      "Entertainment",
+      "Shopping",
+      "Subscriptions",
+      "Gym & Fitness"
+    ]
+  },
+  {
+    "mainCategory": "Financial & Goals",
+    "subCategories": [
+      "Emergency Fund",
+      "Investments",
+      "Debt Paydown",
+      "Savings"
+    ]
+  },
+  {
+    "mainCategory": "Financial Transactions",
+    "subCategories": []
+  }
+]

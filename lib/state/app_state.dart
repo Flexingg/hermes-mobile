@@ -308,6 +308,13 @@ class AppState extends ChangeNotifier {
     notifyListeners();
 
     await _groupSub?.cancel();
+    final gWatchdog = Timer(const Duration(seconds: 150), () {
+      if (groupSending) {
+        groupSending = false;
+        _groupSub?.cancel();
+        _reloadGroupThread(gid);
+      }
+    });
     _groupSub = repo.sendGroupMessage(gid, text).listen(
       (m) {
         final list = _groupMessages.putIfAbsent(gid, () => []);
@@ -320,15 +327,25 @@ class AppState extends ChangeNotifier {
         notifyListeners();
       },
       onError: (e) {
+        gWatchdog.cancel();
         error = e.toString();
         groupSending = false;
-        notifyListeners();
+        _reloadGroupThread(gid);
       },
       onDone: () {
+        gWatchdog.cancel();
         groupSending = false;
-        notifyListeners();
+        _reloadGroupThread(gid);
       },
     );
+  }
+
+  Future<void> _reloadGroupThread(String gid) async {
+    try {
+      _groupMessages[gid] = await repo.groupMessages(gid);
+    } catch (_) {}
+    await loadGroups();
+    notifyListeners();
   }
 
   Future<void> deleteGroup(String gid) async {
@@ -394,6 +411,16 @@ class AppState extends ChangeNotifier {
     notifyListeners();
 
     await _sub?.cancel();
+    // Watchdog: if the stream never completes (e.g. WS hang), force a reload
+    // from the server so the reply appears and the list refreshes without a
+    // full app restart.
+    final watchdog = Timer(const Duration(seconds: 150), () {
+      if (sending) {
+        sending = false;
+        _sub?.cancel();
+        _reloadThread(sid);
+      }
+    });
     _sub = repo.sendMessage(sid, text, attachments: attachments).listen((m) {
       final list = _messages.putIfAbsent(sid, () => []);
       // Replace a streaming placeholder with the same id, else append.
@@ -405,10 +432,12 @@ class AppState extends ChangeNotifier {
       }
       notifyListeners();
     }, onError: (e) {
+      watchdog.cancel();
       error = e.toString();
       sending = false;
-      notifyListeners();
+      _reloadThread(sid);
     }, onDone: () {
+      watchdog.cancel();
       sending = false;
       _sub = null;
       // If notifications are enabled, ping when the assistant reply lands.
@@ -428,6 +457,15 @@ class AppState extends ChangeNotifier {
       notifyListeners();
       refreshSessions();
     });
+  }
+
+  /// Reload a thread's messages from the server and refresh the session list.
+  Future<void> _reloadThread(String sid) async {
+    try {
+      _messages[sid] = await repo.messages(sid);
+    } catch (_) {}
+    await refreshSessions();
+    notifyListeners();
   }
 
   String _sessionTitleFor(String sid) {
