@@ -624,16 +624,39 @@ async def upload_attachment(file: UploadFile = File(...)):
     }
 
 
+def _is_within(p: Path, root: Path) -> bool:
+    try:
+        p.relative_to(root)
+        return True
+    except ValueError:
+        return False
+
+
+def _file_roots() -> list:
+    """Directories /api/v1/files may serve from. HERMES home is always allowed.
+
+    Extra roots come from MER_FILES_ROOTS (colon-separated absolute paths). The
+    default is the app repo root, so host build artifacts (e.g. an APK the agent
+    just built) are downloadable directly in the Mercury app instead of getting
+    a 403 "path outside home".
+    """
+    roots = [HERMES.resolve()]
+    extra = os.environ.get("MER_FILES_ROOTS", "").strip()
+    if extra:
+        items = [Path(x).expanduser().resolve() for x in extra.split(":") if x.strip()]
+    else:
+        items = [Path(__file__).resolve().parents[1]]
+    return roots + [r for r in items if r not in roots]
+
+
 @app.get("/api/v1/files")
 def get_file(path: str = ""):
-    """Download a file the agent produced / the app uploaded (within HERMES home)."""
+    """Download a file the agent produced / the app uploaded (within an allowed root)."""
     if not path:
         raise HTTPException(status_code=400, detail="path required")
     p = Path(path).expanduser().resolve()
-    try:
-        p.relative_to(HERMES.resolve())
-    except ValueError:
-        raise HTTPException(status_code=403, detail="path outside home")
+    if not any(_is_within(p, root) for root in _file_roots()):
+        raise HTTPException(status_code=403, detail="path outside allowed roots")
     if not p.is_file():
         raise HTTPException(status_code=404, detail="not found")
     name = p.name
