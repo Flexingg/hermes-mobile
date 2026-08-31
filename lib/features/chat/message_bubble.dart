@@ -136,6 +136,11 @@ class _ReceivedBubble extends StatelessWidget {
             : Colors.white);
     final isStreaming =
         message.status == ChatMessageStatus.streaming;
+    // Hide streamed tool/status noise unless "show technical details" is on.
+    if (message.type == ChatMessageType.technical &&
+        !context.read<AppConfig>().showTechnical) {
+      return const SizedBox.shrink();
+    }
 
     return Padding(
       padding: const EdgeInsets.symmetric(vertical: 4),
@@ -183,6 +188,11 @@ class _ReceivedBubble extends StatelessWidget {
                     ),
                   if (isStreaming && message.text.isEmpty)
                     const _TypingIndicator()
+                  else if (message.type == ChatMessageType.thinking)
+                    _CollapsibleContent(
+                        header: '💭 Thinking', text: message.text, dimmed: true)
+                  else if (message.type == ChatMessageType.technical)
+                    _CollapsibleContent(header: '🛠', text: message.text)
                   else if (isStreaming)
                     MarkdownBody(
                       data: '${message.text}▌',
@@ -441,3 +451,79 @@ class _DownloadChip extends StatelessWidget {
     }
   }
 }
+
+class _CollapsibleContent extends StatefulWidget {
+  final String header;
+  final String text;
+  final bool dimmed;
+  const _CollapsibleContent({
+    required this.header,
+    required this.text,
+    this.dimmed = false,
+  });
+
+  @override
+  State<_CollapsibleContent> createState() => _CollapsibleContentState();
+}
+
+class _CollapsibleContentState extends State<_CollapsibleContent> {
+  bool _open = false;
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    final base = widget.dimmed ? scheme.onSurfaceVariant : scheme.onSurface;
+    final style = TextStyle(
+      fontSize: 13,
+      height: 1.3,
+      color: base,
+      fontStyle: widget.dimmed ? FontStyle.italic : FontStyle.normal,
+    );
+    final text = widget.text.trim();
+    final flat = text.replaceAll('\n', ' ').replaceAll(RegExp(r'\s+'), ' ');
+    return GestureDetector(
+      onTap: () => setState(() => _open = !_open),
+      behavior: HitTestBehavior.opaque,
+      child: Container(
+        width: double.infinity,
+        constraints: const BoxConstraints(maxWidth: 300),
+        padding: const EdgeInsets.symmetric(vertical: 6, horizontal: 10),
+        decoration: BoxDecoration(
+          color: scheme.surfaceContainerHighest
+              .withValues(alpha: widget.dimmed ? 0.4 : 0.6),
+          borderRadius: BorderRadius.circular(10),
+        ),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Row(
+              children: [
+                Icon(_open ? Icons.expand_less : Icons.expand_more,
+                    size: 14, color: base),
+                const SizedBox(width: 4),
+                Expanded(
+                  child: Text(widget.header,
+                      style: TextStyle(
+                          fontSize: 12,
+                          fontWeight: FontWeight.w600,
+                          color: base)),
+                ),
+              ],
+            ),
+            const SizedBox(height: 3),
+            Text(
+              _open
+                  ? text
+                  : (flat.length > 90 ? '${flat.substring(0, 90)}…' : flat),
+              style: style,
+              maxLines: _open ? null : 1,
+              overflow: _open ? TextOverflow.visible : TextOverflow.ellipsis,
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+

@@ -24,6 +24,7 @@ import sqlite3
 import subprocess
 import threading
 import time
+import yaml
 from pathlib import Path
 
 import psutil
@@ -334,6 +335,38 @@ def _tool_text(content, tool_name) -> str:
     return f"[{tool_name}] {snippet}"
 
 
+def _classify_line(line: str, state: dict) -> str:
+    """Classify a raw Hermes CLI output line for the UI.
+
+    Returns 'skip' (drop), 'thinking', 'technical' (status/tool noise) or
+    'answer' (the agent's actual reply). `state` carries whether we're inside
+    the '╭─ Hermes ─╮' thinking box across lines.
+    """
+    s = line.strip()
+    if not s:
+        return "skip"
+    if s.startswith("╭"):
+        state["thinking"] = True
+        return "thinking"
+    if s.startswith("╰"):
+        state["thinking"] = False
+        return "thinking"
+    if state.get("thinking"):
+        return "thinking"
+    # Tool-progress lines are drawn with a leading ┊ bar.
+    if s.startswith("┊"):
+        return "technical"
+    # Status markers.
+    if s.startswith(("Query:", "Initializing", "↻", "⚡", "⚠", "⌛", "⏸", "✔",
+                     "✖", "Completed", "Thinking", "Session:", "session_id:")) \
+            or "interrupt" in s.lower():
+        return "technical"
+    # Pure separator / box-drawing-only lines -> drop.
+    if all(c in "─━┃│═║╭╮╰╯" for c in s):
+        return "skip"
+    return "answer"
+
+
 def _media_in(text: str | None) -> list[dict]:
     """Find `MEDIA:<path>` references an agent used to hand a file to the user."""
     out = []
@@ -423,14 +456,18 @@ def _run_group_agent(gid: str, agent: str, text: str) -> None:
             cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True
         )
         if proc.stdout is not None:
+            state = {"thinking": False}
             for line in proc.stdout:
                 line = line.rstrip("\n")
                 if not line.strip():
                     continue
-                if line.startswith("session_id:") or line.startswith("Session:"):
+                t = _classify_line(line, state)
+                if t == "skip":
                     continue
-                _broadcast(gid, {"event": "chunk", "agent": agent, "delta": line + "\n"})
-                acc += line + "\n"
+                _broadcast(gid, {"event": "chunk", "agent": agent,
+                                "type": t, "delta": line + "\n"})
+                if t == "answer":
+                    acc += line + "\n"
         proc.wait()
     except Exception:
         pass
@@ -544,11 +581,14 @@ def _spawn_hermes(session_id: str, text: str, attachments: list | None = None) -
         proc = subprocess.Popen(
             cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True
         )
+        state = {"thinking": False}
         if proc.stdout is not None:
             for line in proc.stdout:
-                line = line.rstrip("\n")
-                if line.strip():
-                    _broadcast(session_id, {"event": "chunk", "delta": line + "\n"})
+                t = _classify_line(line, state)
+                if t == "skip":
+                    continue
+                _broadcast(session_id,
+                           {"event": "chunk", "type": t, "delta": line.rstrip("\n") + "\n"})
         proc.wait()
         _broadcast(session_id, {"event": "done"})
         _send_chat_reply_push(session_id)
@@ -922,6 +962,149 @@ def commands():
 def models():
     m = _model()
     return [{"provider": m["provider"], "model": m["model"], "online": True, "quotaStatus": "active"}]
+
+
+# ---- Bot (Hermes profile) CRUD ----------------------------------------
+def _bot_cfg_path(profile: str) -> Path:
+    if profile in ("hermes", "default"):
+        return CONFIG_YAML
+    return PROFILES_DIR / profile / "config.yaml"
+
+def _bot_soul_path(profile: str) -> Path:
+    if profile in ("hermes", "default"):
+        return HERMES / "SOUL.md"
+    return PROFILES_DIR / profile / "SOUL.md"
+
+def _bot_load_cfg(profile: str) -> dict:
+    try:
+        return yaml.safe_load(_bot_cfg_path(profile).read_text()) or {}
+    except Exception:
+        return {}
+
+def _bot_save_cfg(profile: str, cfg: dict) -> None:
+    _bot_cfg_path(profile).write_text(
+        yaml.safe_dump(cfg, sort_keys=False, default_flow_style=False))
+
+def _bot_pet(profile: str) -> str | None:
+    return (_bot_load_cfg(profile).get("display", {}) or {}).get("pet", {}).get("slug")
+
+def _bot_model(profile: str) -> tuple:
+    m = _bot_load_cfg(profile).get("model", {}) or {}
+    return m.get("model"), m.get("provider")
+
+def _bot_desc(profile: str) -> str:
+    return (_bot_load_cfg(profile).get("description", "") or "").strip()
+
+def _bot_soul(profile: str) -> str:
+    p = _bot_soul_path(profile)
+    try:
+        return p.read_text() if p.exists() else ""
+    except Exception:
+        return ""
+
+def _available_pet_slugs() -> list[str]:
+    d = HERMES / "pets" / ".thumbs"
+    if d.exists():
+        return sorted(p.stem for p in d.glob("*.png"))
+    return []
+
+def _all_profiles() -> list[str]:
+    out = ["hermes"]
+    if PROFILES_DIR.exists():
+        out += sorted(p.name for p in PROFILES_DIR.iterdir() if p.is_dir())
+    return out
+
+def _profile_from_bot_id(bot_id: str) -> str:
+    return bot_id.removeprefix("bot-")
+
+def _bot_to_dict(profile: str) -> dict | None:
+    if profile != "hermes" and not (PROFILES_DIR / profile).is_dir():
+        return None
+    model, provider = _bot_model(profile)
+    return {
+        "id": f"bot-{profile}",
+        "name": f"@{profile}" if profile != "hermes" else "@hermes",
+        "description": _bot_desc(profile) or (
+            "Default Hermes agent" if profile == "hermes"
+            else f"Hermes profile: {profile}"),
+        "model": model,
+        "provider": provider,
+        "pet": _bot_pet(profile),
+        "soul": _bot_soul(profile),
+        "isDefault": profile == "hermes",
+    }
+
+@app.get("/api/v1/bots/pets")
+def bot_pets():
+    return _available_pet_slugs()
+
+@app.get("/api/v1/bots")
+def bots():
+    return [d for p in _all_profiles() if (d := _bot_to_dict(p))]
+
+@app.get("/api/v1/bots/{bot_id}")
+def bot_detail(bot_id: str):
+    d = _bot_to_dict(_profile_from_bot_id(bot_id))
+    if not d:
+        raise HTTPException(status_code=404, detail="bot not found")
+    return d
+
+@app.post("/api/v1/bots")
+def create_bot(body: dict):
+    name = (body.get("name") or "").strip().lower().replace(" ", "-")
+    if not name or not re.match(r"^[a-z0-9-]+$", name):
+        raise HTTPException(status_code=400,
+                            detail="invalid name (lowercase letters, numbers, dashes)")
+    if (PROFILES_DIR / name).is_dir():
+        raise HTTPException(status_code=409, detail="bot already exists")
+    desc = (body.get("description") or "").strip()
+    cmd = [HERMES_BIN, "profile", "create", name, "--no-alias"]
+    if desc:
+        cmd += ["--description", desc]
+    proc = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+    if proc.returncode != 0:
+        raise HTTPException(status_code=500,
+                            detail=proc.stderr.strip() or "create failed")
+    return _bot_to_dict(name)
+
+@app.patch("/api/v1/bots/{bot_id}")
+def update_bot(bot_id: str, body: dict):
+    profile = _profile_from_bot_id(bot_id)
+    if profile != "hermes" and not (PROFILES_DIR / profile).is_dir():
+        raise HTTPException(status_code=404, detail="bot not found")
+    cfg = _bot_load_cfg(profile)
+    changed = False
+    if body.get("description") is not None:
+        cfg["description"] = (body["description"] or "").strip()
+        changed = True
+    if body.get("pet") is not None:
+        slug = (body["pet"] or "").strip()
+        if slug and slug not in _available_pet_slugs():
+            raise HTTPException(status_code=400, detail=f"unknown pet: {slug}")
+        cfg.setdefault("display", {})["pet"] = {"enabled": bool(slug), "slug": slug}
+        changed = True
+    if changed:
+        _bot_save_cfg(profile, cfg)
+    if body.get("soul") is not None:
+        sp = _bot_soul_path(profile)
+        sp.parent.mkdir(parents=True, exist_ok=True)
+        sp.write_text(body["soul"] or "")
+    return _bot_to_dict(profile)
+
+@app.delete("/api/v1/bots/{bot_id}")
+def delete_bot(bot_id: str):
+    profile = _profile_from_bot_id(bot_id)
+    if profile == "hermes":
+        raise HTTPException(status_code=400,
+                            detail="cannot delete the default agent")
+    if not (PROFILES_DIR / profile).is_dir():
+        raise HTTPException(status_code=404, detail="bot not found")
+    proc = subprocess.run([HERMES_BIN, "profile", "delete", profile, "-y"],
+                          capture_output=True, text=True, timeout=120)
+    if proc.returncode != 0:
+        raise HTTPException(status_code=500,
+                            detail=proc.stderr.strip() or "delete failed")
+    return {"ok": True}
 
 
 @app.get("/api/v1/servers")

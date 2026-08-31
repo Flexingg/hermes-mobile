@@ -4,6 +4,7 @@ import '../../core/config/app_config.dart';
 import '../../core/notifications/push.dart';
 import '../../core/theme/app_theme.dart';
 import '../../state/app_state.dart';
+import 'bots_page.dart';
 import 'servers_page.dart';
 
 /// Selectable Material seed colors for the accent picker.
@@ -176,6 +177,16 @@ class SettingsPage extends StatelessWidget {
                   trailing: const Icon(Icons.chevron_right),
                   onTap: () => Navigator.of(context).push(
                     MaterialPageRoute(builder: (_) => const ServersPage()),
+                  ),
+                ),
+                ListTile(
+                  leading: const Icon(Icons.smart_toy_outlined),
+                  title: const Text('Bots'),
+                  subtitle: Text('${state.bots.length} agents · edit pets, '
+                      'souls & descriptions'),
+                  trailing: const Icon(Icons.chevron_right),
+                  onTap: () => Navigator.of(context).push(
+                    MaterialPageRoute(builder: (_) => const BotsPage()),
                   ),
                 ),
                 ListTile(

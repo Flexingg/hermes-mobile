@@ -8,6 +8,10 @@ enum ChatMessageStatus { sending, streaming, sent, error }
 
 enum ChatMessageRole { user, assistant, system, tool }
 
+/// What kind of content a streamed assistant message holds. Lets the UI
+/// separate the final answer from Hermes' thinking and tool/status noise.
+enum ChatMessageType { answer, thinking, technical }
+
 class Attachment {
   final String name;
   final String url;
@@ -37,6 +41,7 @@ class ChatMessage {
   final ChatMessageStatus status;
   final String? toolName; // for role == tool
   final String? agent; // for group chats: which agent produced this message
+  final ChatMessageType type; // for streamed assistant content
 
   const ChatMessage({
     required this.id,
@@ -48,6 +53,7 @@ class ChatMessage {
     this.status = ChatMessageStatus.sent,
     this.toolName,
     this.agent,
+    this.type = ChatMessageType.answer,
   });
 
   bool get isUser => role == ChatMessageRole.user;
@@ -66,6 +72,8 @@ class ChatMessage {
       attachments: attachments,
       status: status ?? this.status,
       toolName: toolName,
+      agent: agent,
+      type: type,
     );
   }
 }
@@ -130,6 +138,29 @@ class GroupChat {
     required this.lastPreview,
     required this.lastTimestamp,
     this.messageCount = 0,
+  });
+}
+
+/// A Hermes agent/bot (a Hermes profile) manageable from the app.
+class Bot {
+  final String id;
+  final String name;
+  final String description;
+  final String? model;
+  final String? provider;
+  final String? pet;
+  final String soul;
+  final bool isDefault;
+
+  const Bot({
+    required this.id,
+    required this.name,
+    required this.description,
+    this.model,
+    this.provider,
+    this.pet,
+    this.soul = '',
+    this.isDefault = false,
   });
 }
 

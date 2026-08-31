@@ -51,6 +51,14 @@ abstract class AppRepository {
   Stream<ChatMessage> sendGroupMessage(String gid, String text);
   Future<void> deleteGroup(String gid);
 
+  // ---- Bots (Hermes profiles) ----
+  Future<List<Bot>> bots();
+  Future<List<String>> botPets();
+  Future<Bot> createBot({required String name, String? description});
+  Future<Bot> updateBot(String id,
+      {String? description, String? pet, String? soul});
+  Future<void> deleteBot(String id);
+
   // ---- Push notifications -------------------------------------------
   /// Registers this device's FCM token with the bridge so it can push to us.
   Future<void> registerDevice(String token);

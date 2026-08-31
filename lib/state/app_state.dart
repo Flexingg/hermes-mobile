@@ -41,6 +41,18 @@ class AppState extends ChangeNotifier {
   List<GroupChat> get groups => List.unmodifiable(_groups);
   List<ChatMessage> groupMessagesFor(String gid) => _groupMessages[gid] ?? [];
 
+  // ---- Bots (Hermes profiles) ----
+  List<Bot> _bots = [];
+  List<Bot> get bots => List.unmodifiable(_bots);
+  List<String> _botPets = const [];
+  List<String> get botPets => _botPets;
+  String? _selectedPet = 'boba';
+  String? get selectedPet => _selectedPet;
+  set selectedPet(String? v) {
+    _selectedPet = v;
+    notifyListeners();
+  }
+
   // ---- cached domain data (controller + dashboard) ----
   List<CronJob> cronJobs = [];
   List<Skill> skills = [];
@@ -157,6 +169,8 @@ class AppState extends ChangeNotifier {
     _groups = [];
     _groupMessages.clear();
     _groupSub?.cancel();
+    _bots = [];
+    _botPets = const [];
     notifyListeners();
   }
 
@@ -324,6 +338,39 @@ class AppState extends ChangeNotifier {
     notifyListeners();
   }
 
+  // ---- Bots (Hermes profiles) -----------------------------------------
+  Future<void> loadBots() async {
+    try {
+      _bots = await repo.bots();
+      notifyListeners();
+    } catch (_) {}
+  }
+
+  Future<void> loadBotPets() async {
+    try {
+      _botPets = await repo.botPets();
+      notifyListeners();
+    } catch (_) {}
+  }
+
+  Future<Bot> createBot({required String name, String? description}) async {
+    final b = await repo.createBot(name: name, description: description);
+    await loadBots();
+    return b;
+  }
+
+  Future<void> updateBot(String id,
+      {String? description, String? pet, String? soul}) async {
+    await repo.updateBot(id,
+        description: description, pet: pet, soul: soul);
+    await loadBots();
+  }
+
+  Future<void> deleteBot(String id) async {
+    await repo.deleteBot(id);
+    await loadBots();
+  }
+
   Future<void> toggleStarred(String id) async {
     await repo.toggleStarred(id);
     await refreshSessions();
@@ -407,6 +454,8 @@ class AppState extends ChangeNotifier {
       _safe(loadCommands),
       _safe(loadWebhooks),
       _safe(loadGroups),
+      _safe(loadBots),
+      _safe(loadBotPets),
     ]);
     busy = false;
     notifyListeners();

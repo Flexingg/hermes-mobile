@@ -56,6 +56,14 @@ class HermesRepository implements AppRepository {
     return res.body.isEmpty ? null : jsonDecode(res.body);
   }
 
+  Future<dynamic> _patch(String path, [Map<String, dynamic>? body]) async {
+    final res = await _client.patch(Uri.parse('$baseUrl$path'),
+        headers: _headers, body: jsonEncode(body ?? {}))
+        .timeout(const Duration(seconds: 15));
+    if (res.statusCode >= 400) throw Exception('PATCH $path → ${res.statusCode}');
+    return res.body.isEmpty ? null : jsonDecode(res.body);
+  }
+
   // ---- Servers --------------------------------------------------------
   @override
   Future<List<ServerProfile>> servers() async {
@@ -182,57 +190,57 @@ class HermesRepository implements AppRepository {
           .toList(),
     });
 
-    // 2) Stream the assistant reply over WebSocket.
+    // 2) Stream the assistant reply over WebSocket. Hermes' CLI output is
+    //    divided by the bridge into answer / thinking / technical chunks; we
+    //    render each phase as its own bubble (stable id per phase).
     final wsUrl = baseUrl
         .replaceFirst('http', 'ws')
         .replaceFirst('https', 'wss');
     final channel = WebSocketChannel.connect(
         Uri.parse('$wsUrl/ws/chat/$sessionId'));
-    final replyId = 'live-${DateTime.now().millisecondsSinceEpoch}';
-    String acc = '';
-    var started = false;
+    final baseId = 'live-${DateTime.now().millisecondsSinceEpoch}';
+    final accs = {'answer': '', 'thinking': '', 'technical': ''};
+    String? curType;
+
+    ChatMessage msg(String type, String text, ChatMessageStatus status) {
+      final parsed = type == 'answer'
+          ? _parseMedia(text)
+          : (text: text, attachments: <Attachment>[]);
+      return ChatMessage(
+        id: '$baseId-$type',
+        sessionId: sessionId,
+        role: ChatMessageRole.assistant,
+        text: parsed.text,
+        timestamp: DateTime.now(),
+        status: status,
+        type: type == 'thinking'
+            ? ChatMessageType.thinking
+            : type == 'technical'
+                ? ChatMessageType.technical
+                : ChatMessageType.answer,
+        attachments: parsed.attachments,
+      );
+    }
 
     await for (final raw in channel.stream) {
       final data = jsonDecode(raw as String);
       final event = data['event'] as String? ?? 'chunk';
-      final delta = data['delta'] as String? ?? data['text'] as String? ?? '';
-      if (!started) {
-        started = true;
-        yield ChatMessage(
-          id: replyId,
-          sessionId: sessionId,
-          role: ChatMessageRole.assistant,
-          text: '',
-          timestamp: DateTime.now(),
-          status: ChatMessageStatus.streaming,
-        );
-      }
-      acc += delta;
-      final parsed = _parseMedia(acc);
-      yield ChatMessage(
-        id: replyId,
-        sessionId: sessionId,
-        role: ChatMessageRole.assistant,
-        text: parsed.text,
-        timestamp: DateTime.now(),
-        status: ChatMessageStatus.streaming,
-        attachments: parsed.attachments,
-      );
       if (event == 'done') break;
+      final type = (data['type'] as String?) ?? 'answer';
+      final delta = data['delta'] as String? ?? '';
+      if (type != curType) {
+        if (curType != null && (accs[curType] ?? '').trim().isNotEmpty) {
+          yield msg(curType, accs[curType]!, ChatMessageStatus.sent);
+        }
+        curType = type;
+      }
+      accs[type] = (accs[type] ?? '') + delta;
+      yield msg(type, accs[type]!, ChatMessageStatus.streaming);
     }
     await channel.sink.close();
 
-    if (acc.isNotEmpty) {
-      final parsed = _parseMedia(acc);
-      yield ChatMessage(
-        id: replyId,
-        sessionId: sessionId,
-        role: ChatMessageRole.assistant,
-        text: parsed.text,
-        timestamp: DateTime.now(),
-        status: ChatMessageStatus.sent,
-        attachments: parsed.attachments,
-      );
+    if (curType != null && (accs[curType] ?? '').trim().isNotEmpty) {
+      yield msg(curType, accs[curType]!, ChatMessageStatus.sent);
     }
   }
 
@@ -365,29 +373,21 @@ class HermesRepository implements AppRepository {
         final data = jsonDecode(raw as String);
         final event = data['event'] as String? ?? 'chunk';
         final agent = data['agent'] as String?;
-        final delta = data['delta'] as String? ?? '';
-        final id = 'g-live-${agent ?? 'x'}';
-        if (event == 'start' && agent != null) {
-          acc[agent] = '';
-          yield ChatMessage(
-              id: id, sessionId: gid, role: ChatMessageRole.assistant,
-              text: '', timestamp: DateTime.now(),
-              status: ChatMessageStatus.streaming, agent: agent);
-        } else if (event == 'chunk' && agent != null) {
-          acc[agent] = (acc[agent] ?? '') + delta;
-          final parsed = _parseMedia(acc[agent]!);
-          yield ChatMessage(
-              id: id, sessionId: gid, role: ChatMessageRole.assistant,
-              text: parsed.text, timestamp: DateTime.now(),
-              status: ChatMessageStatus.streaming, agent: agent,
-              attachments: parsed.attachments);
+        if (event == 'chunk' && agent != null) {
+          final type = (data['type'] as String?) ?? 'answer';
+          final delta = data['delta'] as String? ?? '';
+          final id = 'g-live-$agent-$type';
+          acc[id] = (acc[id] ?? '') + delta;
+          yield _groupStreamMsg(gid, agent, type, acc[id]!,
+              ChatMessageStatus.streaming);
         } else if (event == 'done' && agent != null) {
-          final parsed = _parseMedia(acc[agent] ?? '');
-          yield ChatMessage(
-              id: id, sessionId: gid, role: ChatMessageRole.assistant,
-              text: parsed.text, timestamp: DateTime.now(),
-              status: ChatMessageStatus.sent, agent: agent,
-              attachments: parsed.attachments);
+          for (final t in ['answer', 'thinking', 'technical']) {
+            final id = 'g-live-$agent-$t';
+            if ((acc[id] ?? '').trim().isNotEmpty) {
+              yield _groupStreamMsg(gid, agent, t, acc[id]!,
+                  ChatMessageStatus.sent);
+            }
+          }
         } else if (event == 'complete') {
           break;
         }
@@ -399,6 +399,80 @@ class HermesRepository implements AppRepository {
 
   @override
   Future<void> deleteGroup(String gid) async => _delete('/api/v1/groups/$gid');
+
+  // ---- Bots (Hermes profiles) -----------------------------------------
+  @override
+  Future<List<Bot>> bots() async {
+    final data = await _get('/api/v1/bots') as List;
+    return data
+        .cast<Map<String, dynamic>>()
+        .map(_botFromJson)
+        .toList();
+  }
+
+  @override
+  Future<List<String>> botPets() async {
+    final data = await _get('/api/v1/bots/pets') as List;
+    return data.cast<String>().toList();
+  }
+
+  @override
+  Future<Bot> createBot(
+      {required String name, String? description}) async {
+    final data = await _post('/api/v1/bots', {
+      'name': name,
+      if (description != null && description.isNotEmpty)
+        'description': description,
+    });
+    return _botFromJson(data as Map<String, dynamic>);
+  }
+
+  @override
+  Future<Bot> updateBot(String id,
+      {String? description, String? pet, String? soul}) async {
+    final data = await _patch('/api/v1/bots/$id', {
+      'description': ?description,
+      'pet': ?pet,
+      'soul': ?soul,
+    });
+    return _botFromJson(data as Map<String, dynamic>);
+  }
+
+  @override
+  Future<void> deleteBot(String id) async => _delete('/api/v1/bots/$id');
+
+  Bot _botFromJson(Map<String, dynamic> j) => Bot(
+        id: (j['id'] ?? '').toString(),
+        name: (j['name'] ?? '').toString(),
+        description: (j['description'] ?? '').toString(),
+        model: j['model']?.toString(),
+        provider: j['provider']?.toString(),
+        pet: j['pet']?.toString(),
+        soul: j['soul']?.toString() ?? '',
+        isDefault: j['isDefault'] == true,
+      );
+
+  ChatMessage _groupStreamMsg(String gid, String agent, String type, String text,
+      ChatMessageStatus status) {
+    final parsed = type == 'answer'
+        ? _parseMedia(text)
+        : (text: text, attachments: <Attachment>[]);
+    return ChatMessage(
+      id: 'g-live-$agent-$type',
+      sessionId: gid,
+      role: ChatMessageRole.assistant,
+      text: parsed.text,
+      timestamp: DateTime.now(),
+      status: status,
+      agent: agent,
+      type: type == 'thinking'
+          ? ChatMessageType.thinking
+          : type == 'technical'
+              ? ChatMessageType.technical
+              : ChatMessageType.answer,
+      attachments: parsed.attachments,
+    );
+  }
 
   // ---- Cron / skills / memory ----------------------------------------
   @override
