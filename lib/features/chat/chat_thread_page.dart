@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
@@ -37,6 +38,7 @@ class ChatThreadPage extends StatefulWidget {
 
 class _ChatThreadPageState extends State<ChatThreadPage> {
   final _scroll = ScrollController();
+  Timer? _poll;
 
   String _effectiveId(AppState state) => widget.isNewChat
       ? (state.newChatTargetId ?? widget.sessionId)
@@ -53,12 +55,33 @@ class _ChatThreadPageState extends State<ChatThreadPage> {
               text: widget.pendingText ?? '',
               pendingId: widget.sessionId,
             );
+      } else {
+        // Always reload from the server on open. The in-memory cache goes
+        // stale once a reply arrives via push/background (the send-stream has
+        // closed), so opening the thread must refetch or it shows an old
+        // message until the app is restarted. Covers notification taps too.
+        context.read<AppState>().openSession(widget.sessionId);
+        _startPolling();
       }
+    });
+  }
+
+  /// Poll the server for new messages while this thread is open. The bridge's
+  /// WebSocket is one-shot (it closes after a reply's `done`), so there's no
+  /// persistent push channel to a parked thread — a light poll is how a reply
+  /// that arrives while you're sitting here shows up without reopening.
+  void _startPolling() {
+    _poll?.cancel();
+    _poll = Timer.periodic(const Duration(seconds: 5), (_) {
+      if (!mounted) return;
+      final state = context.read<AppState>();
+      state.refreshThread(_effectiveId(state));
     });
   }
 
   @override
   void dispose() {
+    _poll?.cancel();
     _scroll.dispose();
     super.dispose();
   }
@@ -133,7 +156,10 @@ class _ChatThreadPageState extends State<ChatThreadPage> {
           Expanded(
             child: messages.isEmpty
                 ? _empty(context)
-                : ListView.builder(
+                : RefreshIndicator(
+                    onRefresh: () async =>
+                        context.read<AppState>().refreshThread(_effectiveId(state)),
+                    child: ListView.builder(
                     controller: _scroll,
                     padding: const EdgeInsets.fromLTRB(12, 8, 12, 8),
                     itemCount: messages.length,
@@ -160,6 +186,7 @@ class _ChatThreadPageState extends State<ChatThreadPage> {
                       return _InteractiveBubble(message: m, child: bubble);
                     },
                   ),
+                ),
           ),
           if (widget.isNewChat && state.creatingChat)
             _startingBar(context, state)

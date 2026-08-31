@@ -112,8 +112,21 @@ class HermesRepository implements AppRepository {
     required String name,
     required String text,
   }) async {
-    final data = await _post('/api/v1/chat/start', {'name': name, 'text': text});
-    return _sessionFromJson(data as Map<String, dynamic>);
+    // The bridge runs `hermes chat -q <text> --pass-session-id` SYNCHRONOUSLY
+    // (it returns only after the full agent run — tool calls included —
+    // finishes, server timeout is 180s). The generic _post helper times out at
+    // 15s, which used to make the app throw "TimeoutException ... Future not
+    // completed" while the session was actually created server-side. Use a
+    // matching long timeout here so a real new chat (which can take a minute+)
+    // completes instead of erroring out.
+    final res = await _client
+        .post(Uri.parse('$baseUrl/api/v1/chat/start'),
+            headers: _headers, body: jsonEncode({'name': name, 'text': text}))
+        .timeout(const Duration(seconds: 185));
+    if (res.statusCode >= 400) {
+      throw Exception('POST /api/v1/chat/start → ${res.statusCode}');
+    }
+    return _sessionFromJson(jsonDecode(res.body) as Map<String, dynamic>);
   }
 
   @override

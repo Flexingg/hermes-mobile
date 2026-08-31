@@ -196,12 +196,37 @@ class AppState extends ChangeNotifier {
     notifyListeners();
   }
 
+  /// True for messages that only exist on-device (optimistic, streaming,
+  /// sending). These must be preserved across a server reload so an in-flight
+  /// reply isn't clobbered by a refetch.
+  bool _isEphemeral(String id) =>
+      id.startsWith('u-') ||
+      id.startsWith('live-') ||
+      id.startsWith('opt-') ||
+      id.startsWith('g-live-');
+
+  /// Reload a session's messages from the server, keeping any local ephemeral
+  /// messages (optimistic user text, in-flight streaming reply) that the
+  /// server hasn't persisted yet. Fires when called, even if the cache exists —
+  /// this is what prevents a stale thread after a pushed/background reply.
+  Future<void> refreshThread(String sid) async {
+    try {
+      final fresh = await repo.messages(sid);
+      final existing = _messages[sid] ?? const <ChatMessage>[];
+      final ephemeral = existing
+          .where((m) => _isEphemeral(m.id) && !fresh.any((f) => f.id == m.id))
+          .toList();
+      _messages[sid] = [...fresh, ...ephemeral];
+    } catch (_) {
+      // Keep whatever we already had; never disconnect on a reload failure.
+    }
+    notifyListeners();
+  }
+
   Future<void> openSession(String id) async {
     activeSessionId = id;
     await repo.markRead(id);
-    if (!_messages.containsKey(id)) {
-      _messages[id] = await repo.messages(id);
-    }
+    await refreshThread(id); // always reload, not just when the cache is empty
     await refreshSessions();
     notifyListeners();
   }
