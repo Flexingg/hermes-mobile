@@ -1,7 +1,6 @@
 import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter_markdown/flutter_markdown.dart';
-import 'package:path_provider/path_provider.dart';
 import 'package:provider/provider.dart';
 import 'package:share_plus/share_plus.dart';
 import '../../core/config/app_config.dart';
@@ -436,12 +435,9 @@ class _DownloadChip extends StatelessWidget {
     final path = attachment.path;
     if (path == null) return;
     try {
-      final bytes = await state.repo.downloadFile(path);
-      final dir = await getTemporaryDirectory();
-      final f = File('${dir.path}/${attachment.name}');
-      await f.writeAsBytes(bytes);
+      final localPath = await state.repo.downloadFile(path);
       if (!context.mounted) return;
-      await SharePlus.instance.share(ShareParams(files: [XFile(f.path)]));
+      await SharePlus.instance.share(ShareParams(files: [XFile(localPath)]));
     } catch (e) {
       if (context.mounted) {
         ScaffoldMessenger.of(context).showSnackBar(

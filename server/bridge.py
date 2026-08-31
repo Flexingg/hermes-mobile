@@ -31,7 +31,7 @@ import psutil
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
 from starlette.requests import Request
-from starlette.responses import JSONResponse, Response
+from starlette.responses import FileResponse, JSONResponse, Response
 
 HERMES = Path(os.environ.get("HERMES_HOME", str(Path.home() / ".hermes")))
 STATE_DB = HERMES / "state.db"
@@ -367,12 +367,32 @@ def _classify_line(line: str, state: dict) -> str:
     return "answer"
 
 
+_PREVIEW_TYPES = {
+    ".html": "text/html; charset=utf-8",
+    ".htm": "text/html; charset=utf-8",
+    ".css": "text/css; charset=utf-8",
+    ".js": "application/javascript; charset=utf-8",
+    ".mjs": "application/javascript; charset=utf-8",
+    ".json": "application/json",
+    ".svg": "image/svg+xml",
+    ".png": "image/png",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".gif": "image/gif",
+    ".webp": "image/webp",
+    ".ico": "image/x-icon",
+    ".txt": "text/plain; charset=utf-8",
+    ".md": "text/plain; charset=utf-8",
+}
+
+
 def _media_in(text: str | None) -> list[dict]:
     """Find `MEDIA:<path>` references an agent used to hand a file to the user."""
     out = []
     for m in re.finditer(r"MEDIA:\s*(\S+)", text or ""):
         p = Path(m.group(1)).expanduser()
-        out.append({"path": str(p), "name": p.name})
+        kind = "html" if p.suffix.lower() in (".html", ".htm") else "file"
+        out.append({"path": str(p), "name": p.name, "kind": kind})
     return out
 
 
@@ -659,12 +679,10 @@ def get_file(path: str = ""):
         raise HTTPException(status_code=403, detail="path outside allowed roots")
     if not p.is_file():
         raise HTTPException(status_code=404, detail="not found")
-    name = p.name
-    return Response(
-        content=p.read_bytes(),
-        media_type="application/octet-stream",
-        headers={"Content-Disposition": f'attachment; filename="{name}"'},
-    )
+    # Stream from disk (not read_bytes into RAM) so large files like an APK
+    # transfer in chunks — far more robust over Tailscale/cellular than one
+    # monolithic in-memory response, which was dropping mid-body.
+    return FileResponse(p, filename=p.name, media_type="application/octet-stream")
 
 
 @app.get("/api/v1/groups")

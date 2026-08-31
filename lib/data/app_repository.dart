@@ -1,4 +1,3 @@
-import 'dart:typed_data';
 import 'models.dart';
 
 /// The single source of truth interface the whole app talks to.
@@ -32,8 +31,9 @@ abstract class AppRepository {
     required String name,
     String? mimeType,
   });
-  /// Downloads a file (agent-produced or uploaded) from the bridge by path.
-  Future<Uint8List> downloadFile(String serverPath);
+  /// Downloads a file from the bridge by path, streaming it to a local temp
+  /// file. Returns the local file path on the device.
+  Future<String> downloadFile(String serverPath);
   Future<void> markRead(String sessionId);
   Future<void> togglePinned(String sessionId);
   Future<void> toggleStarred(String sessionId);

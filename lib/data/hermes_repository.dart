@@ -1,9 +1,10 @@
 import 'dart:async';
 import 'dart:convert';
-import 'dart:typed_data';
+import 'dart:io';
 import 'dart:ui';
 import 'package:http/http.dart' as http;
 import 'package:http_parser/http_parser.dart';
+import 'package:path_provider/path_provider.dart';
 import 'package:web_socket_channel/web_socket_channel.dart';
 import 'app_repository.dart';
 import 'models.dart';
@@ -292,14 +293,39 @@ class HermesRepository implements AppRepository {
   }
 
   @override
-  Future<Uint8List> downloadFile(String serverPath) async {
+  Future<String> downloadFile(String serverPath) async {
     final uri = Uri.parse(
         '$baseUrl/api/v1/files?path=${Uri.encodeQueryComponent(serverPath)}');
-    final res = await _client
-        .get(uri, headers: _headers)
-        .timeout(const Duration(seconds: 90));
-    if (res.statusCode >= 400) throw Exception('GET /files → ${res.statusCode}');
-    return res.bodyBytes;
+    // Long timeout — a large APK over Tailscale/cellular can take minutes,
+    // and the old 90s cap was cutting transfers off mid-body.
+    const timeout = Duration(minutes: 5);
+    Object? lastError;
+    for (var attempt = 0; attempt < 2; attempt++) {
+      try {
+        final streamed = await _client
+            .send(http.Request('GET', uri)..headers.addAll(_headers))
+            .timeout(timeout);
+        if (streamed.statusCode >= 400) {
+          throw Exception('GET /files → ${streamed.statusCode}');
+        }
+        final dir = await getTemporaryDirectory();
+        final name = serverPath.split('/').last.trim();
+        final safe = name.isEmpty ? 'download' : name;
+        final f = File(
+            '${dir.path}/mercury_${DateTime.now().millisecondsSinceEpoch}_$safe');
+        final sink = f.openWrite();
+        try {
+          await streamed.stream.pipe(sink).timeout(timeout);
+        } finally {
+          await sink.close();
+        }
+        return f.path;
+      } on Exception catch (e) {
+        lastError = e;
+        // Retry once: large transfers over Tailscale/cellular can drop mid-body.
+      }
+    }
+    throw Exception('Download failed: ${lastError ?? 'unknown error'}');
   }
 
   @override
