@@ -9,30 +9,35 @@ action. It publishes:
     Mercury._mercury._tcp.local.    (SRV)  ->  <host>.local.:9130  (+TXT)
     <host>.local.                   (A)    ->  <primary LAN IPv4>
 
-It is deliberately minimal and pure-stdlib: it answers mDNS queries (PTR/SRV/
-TXT/A) on the multicast group and sends an unsolicited announcement on start.
+It is deliberately minimal and pure-stdlib: it answers mDNS queries on BOTH
+IPv4 and IPv6 link-local multicast (so Android NSD / Apple Bonjour browse
+queries are always seen) and sends an unsolicited announcement on start.
 No Avahi, no sudo, no pip packages — it runs as the same user as the bridge.
 
-Only handles the common unicast-response path (class IN, cache-flush answers)
-well enough for Android NSD / Apple Bonjour browsing. Name compression is NOT
-used in answers (writes fully-qualified names) — a little larger but simpler
-and unambiguous.
+Interop notes (why these choices matter):
+- Android NSD (NsdManager, used by bonsoir) only registers a service when the
+  PTR browse answer carries the SRV/TXT/A in the *Additional* section, so every
+  PTR response appends them.
+- Modern Android often browses over IPv6 link-local multicast (ff02::fb), so we
+  answer there too even though the host only carries an IPv4 (A) record.
+- Name compression is not used in answers (fully-qualified names) — simpler and
+  unambiguous.
 """
 
 import argparse
 import fcntl
 import os
+import select
 import signal
 import socket
-import socket as s
 import struct
 import sys
-import time
 
-_MCAST_GRP = "224.0.0.251"
 _MCAST_PORT = 5353
+_V4_GRP = "224.0.0.251"
+_V6_GRP = "ff02::fb"
 _MDNS_HEADER = 12
-_FLUSH = 0x8000  # cache-flush bit for answers in legacy-unicast responses
+_FLUSH = 0x8000  # cache-flush bit (set in multicast responses)
 
 
 def _qname_encode(name: str) -> bytes:
@@ -45,22 +50,39 @@ def _qname_encode(name: str) -> bytes:
     return bytes(out)
 
 
-def _primary_ipv4() -> str:
-    """Return the IPv4 of the interface holding the default route."""
-    # /proc/net/route: iface, dest, gateway, flags, ...
+def _default_iface() -> str:
+    """Name of the interface holding the default route (or '')."""
     try:
-        with open("/proc/net/route", "r") as fh:
+        with open("/proc/net/route") as fh:
             for line in fh.readlines()[1:]:
-                parts = line.split()
-                if not parts:
-                    continue
-                dest = parts[1]
-                if dest == "00000000":  # default route
-                    iface = parts[0]
-                    return _iface_ipv4(iface)
-    except (OSError, IndexError):
+                p = line.split()
+                if len(p) > 1 and p[1] == "00000000":
+                    return p[0]
+    except OSError:
         pass
-    # Fallback: ask the kernel which address would reach a public host.
+    return ""
+
+
+def _iface_ipv4(iface: str) -> str:
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        return socket.inet_ntoa(
+            fcntl.ioctl(sock.fileno(), 0x8915,  # SIOCGIFADDR
+                        struct.pack("256s", iface.encode()[:15]))[20:24])
+    except OSError:
+        return "127.0.0.1"
+    finally:
+        sock.close()
+
+
+def _primary_ipv4() -> str:
+    """IPv4 of the default-route interface (what LAN clients can reach)."""
+    iface = _default_iface()
+    if iface:
+        ip = _iface_ipv4(iface)
+        if not ip.startswith("127."):
+            return ip
+    # Fallback: ask the kernel which address reaches a public host.
     try:
         tmp = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         try:
@@ -72,132 +94,174 @@ def _primary_ipv4() -> str:
         return "127.0.0.1"
 
 
-def _iface_ipv4(iface: str) -> str:
-    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    try:
-        return socket.inet_ntoa(
-            fcntl.ioctl(
-                sock.fileno(), 0x8915,  # SIOCGIFADDR
-                struct.pack("256s", iface.encode()[:15]),
-            )[20:24]
-        )
-    except OSError:
-        return "127.0.0.1"
-    finally:
-        sock.close()
-
-
 def _hostname() -> str:
     hn = socket.gethostname().split(".")[0] or "hermes"
-    # mDNS names must be < 63 chars and not end in '-'.
     hn = hn.strip("-")[:63]
     return hn + ".local"
+
+
+def _make_socket(family, reuse=True):
+    sock = socket.socket(family, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
+    if reuse:
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        if hasattr(socket, "SO_REUSEPORT"):
+            try:
+                sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
+            except OSError:
+                pass
+    return sock
 
 
 class MdnsAdvertiser:
     def __init__(self, instance: str, type_: str, port: int, txt: dict):
         self.instance = instance
-        self.service_type = type_.lstrip("_").split("._")  # e.g. ["mercury","tcp"]
-        self.type_name = f"_{self.service_type[0]}._tcp.local."
+        segs = type_.lstrip("_").split("._")
+        self.type_name = f"_{segs[0]}._tcp.local."
         self.port = port
         self.host = _hostname()
         self.ip = _primary_ipv4()
         self.fqdn = f"{self.instance}.{self.type_name}"
         self.txt = txt
-        self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
-        self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        if hasattr(socket, "SO_REUSEPORT"):
-            try:
-                self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
-            except OSError:
-                pass
-        self.sock.bind(("", _MCAST_PORT))
-        self._ttl = struct.pack("B", 255)
-        self.sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_TTL, self._ttl)
-        self.sock.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP,
-                             socket.inet_aton(_MCAST_GRP) + socket.inet_aton("0.0.0.0"))
-        self.sock.settimeout(0.5)
+        self.iface = _default_iface()
 
-    # ---- record builders -------------------------------------------------
+        self.socks = []  # (socket, is_v6, mcast_group, scope_ifindex)
+        self._setup_v4()
+        self._setup_v6()
+
+    # ---- socket setup -----------------------------------------------------
+    def _setup_v4(self):
+        sock = _make_socket(socket.AF_INET)
+        sock.bind(("", _MCAST_PORT))
+        sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_TTL,
+                        struct.pack("B", 255))
+        sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_LOOP,
+                        struct.pack("B", 1))
+        sock.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP,
+                        socket.inet_aton(_V4_GRP) + socket.inet_aton("0.0.0.0"))
+        sock.settimeout(0.2)
+        self.socks.append([sock, False, _V4_GRP, 0])
+
+    def _setup_v6(self):
+        if not hasattr(socket, "AF_INET6"):
+            return
+        idx = 0
+        if self.iface:
+            try:
+                idx = socket.if_nametoindex(self.iface)
+            except OSError:
+                idx = 0
+        sock = None
+        try:
+            sock = _make_socket(socket.AF_INET6)
+            sock.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 1)
+            sock.bind(("::", _MCAST_PORT))
+            mreq = socket.inet_pton(socket.AF_INET6, _V6_GRP) + struct.pack("@I", idx)
+            sock.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_JOIN_GROUP, mreq)
+            sock.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_MULTICAST_LOOP, 1)
+            if idx:
+                sock.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_MULTICAST_IF,
+                                struct.pack("@I", idx))
+            sock.settimeout(0.2)
+            self.socks.append([sock, True, _V6_GRP, idx])
+        except OSError:
+            if sock is not None:
+                try:
+                    sock.close()
+                except Exception:
+                    pass
+
+    # ---- record builders (name, qtype, class, ttl, rdata) ----------------
     def _ptr(self):
-        return (_qname_encode(self.type_name), 12, 0x8000 | 0x0001, 4500,
+        return (_qname_encode(self.type_name), 12, 0x0001, 4500,
                 _qname_encode(self.fqdn))
 
     def _srv(self):
         rd = struct.pack(">HHH", 0, 0, self.port) + _qname_encode(self.host)
-        return (_qname_encode(self.fqdn), 33, 0x8000 | 0x0001, 120, rd)
+        return (_qname_encode(self.fqdn), 33, 0x0001, 120, rd)
 
     def _txt(self):
         rd = b"".join(
             bytes([min(len(str(k)) + len(str(v)) + 1, 255)])
             + (str(k) + "=" + str(v)).encode("utf-8")[:255]
-            for k, v in self.txt.items()
-        )
+            for k, v in self.txt.items())
         if not rd:
             rd = b"\x00"
-        return (_qname_encode(self.fqdn), 16, 0x8000 | 0x0001, 4500, rd)
+        return (_qname_encode(self.fqdn), 16, 0x0001, 4500, rd)
 
     def _a(self):
-        return (_qname_encode(self.host), 1, 0x8000 | 0x0001, 120,
+        return (_qname_encode(self.host), 1, 0x0001, 120,
                 socket.inet_aton(self.ip))
 
+    def _all(self):
+        return [self._ptr(), self._srv(), self._txt(), self._a()]
+
+    # ---- response assembly ------------------------------------------------
     def _respond(self, qname_bytes: bytes, qtype: int):
-        """Return an answer record matching qname/qtype, or None."""
-        name = qname_bytes.decode("ascii", "replace").lower()
-        # Strip trailing dot; also try instance-less type queries.
-        base = name.rstrip(".")
+        """Return (answers, additionals) for a question, or (None, None)."""
+        base = qname_bytes.decode("ascii", "replace").lower().rstrip(".")
         fqdn = self.fqdn.rstrip(".").lower()
         type_n = self.type_name.rstrip(".").lower()
         host = self.host.rstrip(".").lower()
-        if base == type_n and qtype in (12, 255):  # PTR / ANY
-            return self._ptr()
-        if base == fqdn and qtype in (33, 16, 255):
-            if qtype == 16:
-                return self._txt()
-            if qtype == 255:
-                return self._ptr()
-            return self._srv()
-        if base == host and qtype in (1, 255):  # A / ANY
-            return self._a()
-        # Some clients ask with the instance name but PTR type directly.
-        if base == fqdn and qtype == 12:
-            return self._ptr()
-        return None
 
-    def _all_records(self):
-        return [self._ptr(), self._srv(), self._txt(), self._a()]
+        if base == type_n and qtype in (12, 255):       # PTR / ANY on type
+            return [self._ptr()], [self._srv(), self._txt(), self._a()]
+        if base == fqdn:
+            if qtype == 33:                              # SRV
+                return [self._srv()], [self._a()]
+            if qtype == 16:                              # TXT
+                return [self._txt()], []
+            if qtype == 12:                              # PTR on instance
+                return [self._ptr()], [self._srv(), self._txt(), self._a()]
+            if qtype == 255:                             # ANY on instance
+                return [self._srv(), self._txt(), self._a()], []
+        if base == host and qtype in (1, 255):           # A / ANY on host
+            return [self._a()], []
+        return None, None
 
-    def _send(self, answers, to=None):
-        if not answers:
+    def _send(self, sock, is_v6, mcast_group, ifidx, answers, additionals,
+              to_multicast, dest=None):
+        if not answers and not additionals:
             return
         out = bytearray()
-        out += struct.pack(">HHHHHH", 0, 0x8400, 0, len(answers), 0, 0)  # response
-        for name, qtype, flags, ttl, rd in answers:
+        out += struct.pack(">HHHHHH", 0, 0x8400, 0,
+                           len(answers), 0, len(additionals))
+        flush = 0x8000 if to_multicast else 0x0000
+        for rec in answers + additionals:
+            name, qtype, cls, ttl, rd = rec
             out += name
-            out += struct.pack(">HHIH", qtype, flags, ttl, len(rd))
+            out += struct.pack(">HHIH", qtype, flush | cls, ttl, len(rd))
             out += rd
-        dest = to or (_MCAST_GRP, _MCAST_PORT)
+        if to_multicast:
+            if is_v6:
+                dest = (mcast_group, _MCAST_PORT, 0, ifidx)
+            else:
+                dest = (mcast_group, _MCAST_PORT)
         try:
-            self.sock.sendto(bytes(out), dest)
+            sock.sendto(bytes(out), dest)
         except OSError:
             pass
 
+    def _multicast_dest(self, entry):
+        if entry[1]:
+            return (entry[2], _MCAST_PORT, 0, entry[3])
+        return (entry[2], _MCAST_PORT)
+
+    # ---- query decoding ----------------------------------------------------
     def _query_name(self, data: bytes, offset: int):
-        """Decode a possibly-compressed DNS name from data starting at offset."""
         labels = []
-        jumps = 0
         pos = offset
         end = None
+        jumps = 0
         while True:
             ln = data[pos]
             if ln & 0xC0 == 0xC0:  # compression pointer
                 ptr = struct.unpack(">H", data[pos:pos + 2])[0] & 0x3FFF
                 if end is None:
                     end = pos + 2
+                pos = ptr
                 jumps += 1
                 if jumps > 8:
                     break
-                pos = ptr
                 continue
             if ln == 0:
                 if end is None:
@@ -210,51 +274,67 @@ class MdnsAdvertiser:
                 break
         return ".".join(labels), (end if end is not None else pos)
 
-    def run(self, once=False):
-        # Unsolicited announcement so phones discover it immediately.
-        self._send(self._all_records())
+    # ---- main loop ----------------------------------------------------------
+    def run(self):
+        # Unsolicited announcements so phones discover it without querying.
+        for entry in self.socks:
+            self._send(entry[0], entry[1], entry[2], entry[3],
+                       self._all(), [], True)
         while True:
             try:
-                data, addr = self.sock.recvfrom(65535)
-            except socket.timeout:
-                if once:
-                    return
-                continue
-            except OSError:
+                r, _, _ = select.select([e[0] for e in self.socks], [], [], 0.5)
+            except (OSError, ValueError):
                 return
-            self._handle(data, addr)
-            if once:
-                return
+            for sock in r:
+                # Which logical entry does this fd belong to?
+                entry = next((e for e in self.socks if e[0] is sock), None)
+                if entry is None:
+                    continue
+                try:
+                    data, addr = sock.recvfrom(65535)
+                except OSError:
+                    continue
+                try:
+                    self._handle(entry, data, addr)
+                except Exception:
+                    continue
 
-    def _handle(self, data, addr):
+    def _handle(self, entry, data, addr):
+        sock, is_v6, mcast_group, ifidx = entry
         if len(data) < _MDNS_HEADER + 4:
             return
         try:
             (_, flags, qd, an, ns, ar) = struct.unpack(">HHHHHH", data[0:12])
         except struct.error:
             return
-        if flags & 0x8000:  # this is a response; ignore (probing, etc.)
+        if flags & 0x8000:  # it's already a response; ignore
             return
         pos = 12
         answers = []
+        additionals = []
+        unicast_reply = False
         for _ in range(qd):
             qname, pos = self._query_name(data, pos)
             if pos is None or pos + 4 > len(data):
                 return
             qtype, qclass = struct.unpack(">HH", data[pos:pos + 4])
             pos += 4
-            if qclass != 1 and qclass != 0x8001:  # IN
-                continue
-            rec = self._respond(qname.encode("ascii", "replace"), qtype)
-            if rec is not None:
-                answers.append(rec)
-        if answers:
-            # Reply to multicast queries via multicast (unless legacy unicast
-            # bit set on the query), else unicast to the source.
-            if flags & 0x0001 or addr[0] == _MCAST_GRP:
-                self._send(answers)
-            else:
-                self._send(answers, to=addr)
+            if qclass & 0x8000:  # QU: client wants a unicast reply
+                unicast_reply = True
+            a, add = self._respond(qname.encode("ascii", "replace"), qtype)
+            if a:
+                answers += a
+                if add:
+                    additionals += add
+        if not answers:
+            return
+        if unicast_reply:
+            # Legacy unicast reply, no cache-flush bit.
+            self._send(sock, is_v6, mcast_group, ifidx, answers, additionals,
+                       False, dest=addr)
+        else:
+            self._send(sock, is_v6, mcast_group, ifidx, answers, additionals,
+                       True)
 
 
 def main():
@@ -271,8 +351,8 @@ def main():
         txt["app"] = "mercury"
 
     adv = MdnsAdvertiser(args.instance, "_mercury._tcp", args.port, txt)
-    print(f"Advertising {adv.fqdn} (SRV -> {adv.host}:{args.port}, A -> {adv.ip})",
-          flush=True)
+    print(f"Advertising {adv.fqdn} (SRV -> {adv.host}:{args.port}, "
+          f"A -> {adv.ip}, iface={adv.iface})", flush=True)
 
     if args.pidfile:
         with open(args.pidfile, "w") as f:
