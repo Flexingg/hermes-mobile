@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
+import '../../core/network/bridge_discovery.dart';
 import '../../state/app_state.dart';
 
 /// Full-screen onboarding: link the app to a real Hermes bridge server.
@@ -16,12 +17,41 @@ class _ConnectServerPageState extends State<ConnectServerPage> {
   final _url = TextEditingController(text: 'http://100.67.34.4:9130');
   final _token = TextEditingController();
 
+  bool _scanning = false;
+  List<DiscoveredBridge> _found = const [];
+
   @override
   void dispose() {
     _name.dispose();
     _url.dispose();
     _token.dispose();
     super.dispose();
+  }
+
+  Future<void> _scan() async {
+    setState(() {
+      _scanning = true;
+      _found = const [];
+    });
+    final results = await BridgeDiscovery.discover(timeout: const Duration(seconds: 4));
+    if (!mounted) return;
+    setState(() {
+      _scanning = false;
+      _found = results;
+    });
+    if (results.isEmpty && mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+            content: Text('No Mercury bridges found on this network. '
+                'Check the bridge host is on the same Wi-Fi and try again.')),
+      );
+    }
+  }
+
+  void _apply(DiscoveredBridge b) {
+    _name.text = b.name;
+    _url.text = b.baseUrl;
+    setState(() {});
   }
 
   Future<void> _connect() async {
@@ -100,6 +130,52 @@ class _ConnectServerPageState extends State<ConnectServerPage> {
                       prefixIcon: Icon(Icons.key_outlined),
                     ),
                   ),
+                  const SizedBox(height: 16),
+                  Divider(height: 1, color: scheme.outlineVariant),
+                  const SizedBox(height: 16),
+                  Text('Found it automatically?',
+                      style: Theme.of(context)
+                          .textTheme
+                          .titleSmall
+                          ?.copyWith(color: scheme.onSurfaceVariant)),
+                  const SizedBox(height: 4),
+                  Text(
+                    'Bridges advertise on your local network. Tap one to fill the '
+                    'server name and URL above.',
+                    style: Theme.of(context)
+                        .textTheme
+                        .bodySmall
+                        ?.copyWith(color: scheme.onSurfaceVariant),
+                  ),
+                  const SizedBox(height: 12),
+                  OutlinedButton.icon(
+                    onPressed: state.busy || _scanning ? null : _scan,
+                    icon: _scanning
+                        ? const SizedBox(
+                            width: 18,
+                            height: 18,
+                            child: CircularProgressIndicator(strokeWidth: 2))
+                        : const Icon(Icons.wifi_tethering),
+                    label: Text(_scanning ? 'Searching…' : 'Search your network'),
+                  ),
+                  if (_found.isNotEmpty) ...[
+                    const SizedBox(height: 8),
+                    ..._found.map(
+                      (b) => Card(
+                        margin: const EdgeInsets.only(bottom: 8),
+                        child: ListTile(
+                          dense: true,
+                          leading: Icon(Icons.dns_outlined,
+                              color: scheme.primary),
+                          title: Text(b.name),
+                          subtitle: Text(b.baseUrl,
+                              maxLines: 1, overflow: TextOverflow.ellipsis),
+                          trailing: const Icon(Icons.chevron_right),
+                          onTap: () => _apply(b),
+                        ),
+                      ),
+                    ),
+                  ],
                   const SizedBox(height: 20),
                   if (state.error != null) ...[
                     Container(

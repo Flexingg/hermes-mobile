@@ -18,7 +18,10 @@ dynamic-color theming.
 ### 🔌 Connection & Identity
 1. Multi-server profiles (gateway LAN/remote) · 2. Secure token auth (Bearer) · 3. QR pairing (planned)
 · 4. Multiple bots per server (@hermes, @buff_patrick, @homie) · 5. TLS / self-signed cert support
-· 6. Connection health · 7. Auto-reconnect (in HermesRepository)
+· 6. Connection health · 7. Auto-reconnect (in HermesRepository).
+*Auto-find bridge on LAN:* the connect screen's "Search your network" browses mDNS for
+`_mercury._tcp` (list found bridges, tap to fill the URL); advertise on the host with
+`server/announce_bridge.py` (see `hermes-bridge-announce.service`).
 
 ### 💬 Chat Core
 8. Streaming chat (WebSocket / simulated) · 9. Markdown + rich rendering (flutter_markdown)
