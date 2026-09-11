@@ -56,6 +56,13 @@ UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
 GROUP_STORE = HERMES / "mercury_groups.json"
 # Allowed vault root for Tasker scan_vault tasks. No default (must be configured).
 MER_VAULT_PATH = os.environ.get("MER_VAULT_PATH", "")
+# Default agent profile for chat ("" = default profile).
+MER_CHAT_PROFILE = os.environ.get("MER_CHAT_PROFILE", "")
+
+
+def _chat_profile() -> str | None:
+    val = os.environ.get("MER_CHAT_PROFILE", MER_CHAT_PROFILE).strip()
+    return val or None
 
 app = FastAPI(title="Hermes Mobile bridge", version="1.0")
 app.add_middleware(
@@ -510,14 +517,25 @@ def create_session(body: dict):
     import uuid
 
     sid = dt.datetime.now().strftime("%Y%m%d_%H%M%S") + "_" + uuid.uuid4().hex[:6]
-    title = (body.get("title") or "New conversation")[:200]
+    base_title = (body.get("title") or "New conversation")[:200]
+    title = base_title
+    profile = (body.get("profile") or body.get("profileId") or _chat_profile() or "hermes").strip()
     con = _db()
-    con.execute(
-        """INSERT INTO sessions (id, source, title, started_at, last_activity_at,
-                                 message_count, tool_call_count, archived, hidden)
-           VALUES (?,?,?,?,?,0,0,0,0)""",
-        (sid, body.get("profileId") or "hermes", title, _now(), _now()),
-    )
+    try:
+        con.execute(
+            """INSERT INTO sessions (id, source, title, started_at, last_activity_at,
+                                     message_count, tool_call_count, archived, hidden)
+               VALUES (?,?,?,?,?,0,0,0,0)""",
+            (sid, profile, title, _now(), _now()),
+        )
+    except sqlite3.IntegrityError:
+        title = f"{base_title} ({sid[-6:]})"[:200]
+        con.execute(
+            """INSERT INTO sessions (id, source, title, started_at, last_activity_at,
+                                     message_count, tool_call_count, archived, hidden)
+               VALUES (?,?,?,?,?,0,0,0,0)""",
+            (sid, profile, title, _now(), _now()),
+        )
     con.commit()
     con.close()
     return {
@@ -528,7 +546,7 @@ def create_session(body: dict):
         "unreadCount": 0,
         "pinned": False,
         "starred": False,
-        "profileId": body.get("profileId") or "hermes",
+        "profileId": profile,
         "color": _hash_color(sid),
     }
 
@@ -540,9 +558,13 @@ def chat_start(body: dict):
     text = (body.get("text") or "").strip()
     if not text:
         raise HTTPException(status_code=400, detail="text required")
+    profile = (body.get("profile") or body.get("profileId") or _chat_profile() or "").strip() or None
+    cmd = [HERMES_BIN, "chat", "-q", text, "--pass-session-id"]
+    if profile:
+        cmd += ["-p", profile]
     try:
         p = subprocess.run(
-            [HERMES_BIN, "chat", "-q", text, "--pass-session-id"],
+            cmd,
             capture_output=True, text=True, timeout=180,
         )
     except Exception as e:
@@ -562,7 +584,7 @@ def chat_start(body: dict):
         "unreadCount": 0,
         "pinned": False,
         "starred": False,
-        "profileId": "hermes",
+        "profileId": profile or "hermes",
         "color": _hash_color(sid),
     }
 
@@ -571,11 +593,14 @@ def chat_start(body: dict):
 def send_message(session_id: str, body: dict):
     text = (body.get("text") or "").strip()
     attachments = body.get("attachments") or []
-    _spawn_hermes(session_id, text, attachments)
+    profile = body.get("profile") or body.get("profileId")
+    _spawn_hermes(session_id, text, attachments, profile=profile)
     return {"ok": True, "pending": True}
 
 
-def _spawn_hermes(session_id: str, text: str, attachments: list | None = None) -> None:
+def _spawn_hermes(
+    session_id: str, text: str, attachments: list | None = None, profile: str | None = None
+) -> None:
     attachments = attachments or []
     query = text
     img_path = None
@@ -596,11 +621,14 @@ def _spawn_hermes(session_id: str, text: str, attachments: list | None = None) -
         query = (
             f"{query}\n\n[Attached files: {refs}. Read them with read_file/search_files if needed.]"
         )
+    prof = (profile or _chat_profile() or "").strip() or None
 
     def run():
         cmd = [HERMES_BIN, "chat", "-q", query, "--resume", session_id]
         if img_path:
             cmd += ["--image", img_path]
+        if prof:
+            cmd += ["-p", prof]
         # start_new_session: run hermes in its own process group/session so
         # stray SIGHUP/SIGTERM sent to the bridge's group can't interrupt the
         # in-flight model call. stdin=/dev/null: no inherited terminal.
