@@ -54,6 +54,8 @@ DEVICE_TOKENS = HERMES / "mercury_devices.json"
 UPLOADS_DIR = HERMES / "uploads"
 UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
 GROUP_STORE = HERMES / "mercury_groups.json"
+# Allowed vault root for Tasker scan_vault tasks. No default (must be configured).
+MER_VAULT_PATH = os.environ.get("MER_VAULT_PATH", "")
 
 app = FastAPI(title="Hermes Mobile bridge", version="1.0")
 app.add_middleware(
@@ -1230,6 +1232,211 @@ def webhooks():
 @app.post("/api/v1/webhooks/{webhook_id}/trigger")
 def trigger_webhook(webhook_id: str):
     return {"ok": True}
+
+
+# ---------------------------------------------------------------------------
+# Tasker endpoints: triggerable Hermes tasks via HTTP (docs/tasker-endpoints.md)
+# ---------------------------------------------------------------------------
+def _build_scan_vault_prompt(path: str | None = None, mode: str | None = None, note: str | None = None) -> str:
+    vault_target = path or "vault"
+    prompt = (
+        f"Scan my Obsidian vault at {vault_target}. Summarize what's new or changed, "
+        "list any TODO/checklist items, and write/update an index note. Be concise."
+    )
+    if mode:
+        prompt += f" Mode: {mode}."
+    if note:
+        prompt += f" Context: {note}."
+    return prompt
+
+
+def _build_daily_digest_prompt(path: str | None = None, mode: str | None = None, note: str | None = None) -> str:
+    prompt = (
+        "Generate a daily digest summarizing today's key tasks, upcoming events, and recent notes. "
+        "Be concise and actionable."
+    )
+    if path:
+        prompt += f" Check files at {path}."
+    if mode:
+        prompt += f" Mode: {mode}."
+    if note:
+        prompt += f" Context: {note}."
+    return prompt
+
+
+TASK_REGISTRY = {
+    "scan_vault": {
+        "description": "Scan the markdown vault and summarize changes",
+        "builder": _build_scan_vault_prompt,
+        "requires_vault": True,
+    },
+    "daily_digest": {
+        "description": "Generate a daily digest of tasks, events, and notes",
+        "builder": _build_daily_digest_prompt,
+        "requires_vault": False,
+    },
+}
+
+
+def _extract_answer(stdout: str) -> str:
+    """Extract clean answer text from hermes chat -q stdout."""
+    clean = re.sub(r"\x1b\[[0-9;]*[a-zA-Z]", "", stdout)
+    boxes = re.findall(r"╭─[^\n]+╮\n(.*?)\n╰─[^\n]+╯", clean, re.DOTALL)
+    if boxes:
+        return boxes[-1].strip()
+    clean = re.sub(r"^Query:.*?\nInitializing agent\.\.\.\s*", "", clean, flags=re.DOTALL)
+    clean = re.sub(r"Resume this session with:.*$", "", clean, flags=re.DOTALL)
+    return clean.strip()
+
+
+@app.get("/api/v1/tasker/tasks")
+def tasker_tasks():
+    """Return registered task names and one-line descriptions."""
+    return {
+        "tasks": [
+            {"name": name, "description": meta["description"]}
+            for name, meta in TASK_REGISTRY.items()
+        ]
+    }
+
+
+@app.post("/api/v1/tasker/run")
+def tasker_run(body: dict | None = None):
+    """Trigger a registered Hermes task.
+
+    Async by default: spawns `hermes chat -q <prompt> --pass-session-id` in a
+    background thread, parses stdout for session id, and returns 202 immediately.
+    If wait=true, runs synchronously with a bounded timeout (~180s) and returns answer.
+    """
+    body = body or {}
+    task = (body.get("task") or "").strip()
+    if not task:
+        raise HTTPException(status_code=400, detail="task required")
+    if task not in TASK_REGISTRY:
+        raise HTTPException(status_code=400, detail=f"unknown task '{task}'")
+
+    task_def = TASK_REGISTRY[task]
+    requires_vault = task_def.get("requires_vault", False)
+
+    mer_vault_env = os.environ.get("MER_VAULT_PATH", "").strip()
+    path_input = (body.get("path") or "").strip()
+    path_str: str | None = None
+
+    if requires_vault or path_input:
+        if not mer_vault_env:
+            raise HTTPException(
+                status_code=400,
+                detail="vault not configured — set MER_VAULT_PATH on the bridge",
+            )
+        vault_root = Path(mer_vault_env).expanduser().resolve()
+        if path_input:
+            target_path = Path(path_input).expanduser().resolve()
+            if not _is_within(target_path, vault_root):
+                raise HTTPException(
+                    status_code=403,
+                    detail="path outside allowed vault root",
+                )
+            path_str = str(target_path)
+        else:
+            path_str = str(vault_root)
+
+    mode = (body.get("mode") or "").strip() or None
+    note = (body.get("note") or "").strip() or None
+    wait = bool(body.get("wait", False))
+
+    builder = task_def["builder"]
+    prompt = builder(path=path_str, mode=mode, note=note)
+
+    cmd = [HERMES_BIN, "chat", "-q", prompt, "--pass-session-id"]
+
+    if wait:
+        print(f"[tasker] sync run starting: task={task} path={path_str}", flush=True)
+        try:
+            p = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=180,
+                stdin=subprocess.DEVNULL,
+            )
+        except subprocess.TimeoutExpired:
+            raise HTTPException(status_code=504, detail="task execution timed out")
+        except Exception as e:
+            raise HTTPException(status_code=502, detail=f"hermes failed: {e}")
+
+        out = (p.stdout or "") + "\n" + (p.stderr or "")
+        m = re.search(r"Session:\s+([0-9A-Za-z_]+)", out)
+        sid = m.group(1) if m else None
+        answer = _extract_answer(p.stdout or "")
+        print(f"[tasker] sync run finished: task={task} sessionId={sid} path={path_str}", flush=True)
+        if task == "scan_vault":
+            body_msg = (answer[:200] if answer else "Vault scan complete.")
+            _send_push("Vault scan complete", body_msg, {"type": "tasker", "task": task, "session_id": sid or ""})
+        return {"ok": True, "answer": answer, "sessionId": sid}
+
+    # Async by default: run in background thread
+    session_id_holder: list[str] = []
+    session_event = threading.Event()
+    out_lines: list[str] = []
+
+    try:
+        proc = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            stdin=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"failed to spawn hermes: {e}")
+
+    def _stream_and_finish():
+        try:
+            if proc.stdout is not None:
+                for line in proc.stdout:
+                    out_lines.append(line)
+                    if not session_id_holder:
+                        m = re.search(r"Session:\s+([0-9A-Za-z_]+)", line)
+                        if m:
+                            session_id_holder.append(m.group(1))
+                            session_event.set()
+            proc.wait()
+            full_out = "".join(out_lines)
+            if not session_id_holder:
+                m = re.search(r"Session:\s+([0-9A-Za-z_]+)", full_out)
+                if m:
+                    session_id_holder.append(m.group(1))
+            session_event.set()
+
+            sid = session_id_holder[0] if session_id_holder else None
+            print(f"[tasker] async run finished: task={task} sessionId={sid} path={path_str}", flush=True)
+            if task == "scan_vault":
+                answer = _extract_answer(full_out)
+                body_msg = (answer[:200] if answer else "Vault scan complete.")
+                _send_push("Vault scan complete", body_msg, {"type": "tasker", "task": task, "session_id": sid or ""})
+        except Exception as e:
+            print(f"[tasker] background worker error: {e}", flush=True)
+            session_event.set()
+
+    t = threading.Thread(target=_stream_and_finish, daemon=True)
+    t.start()
+
+    session_event.wait(timeout=25.0)
+    if proc.poll() is not None and proc.returncode != 0 and not session_id_holder:
+        err_snippet = ("".join(out_lines)).strip()[:200]
+        raise HTTPException(status_code=502, detail=f"hermes failed ({proc.returncode}): {err_snippet}")
+
+    sid = session_id_holder[0] if session_id_holder else None
+    if not sid:
+        import uuid
+        sid = dt.datetime.now().strftime("%Y%m%d_%H%M%S") + "_" + uuid.uuid4().hex[:6]
+
+    print(f"[tasker] returning 202: task={task} sessionId={sid} path={path_str}", flush=True)
+    resp_data = {"ok": True, "task": task, "sessionId": sid}
+    if path_str is not None:
+        resp_data["path"] = path_str
+    return JSONResponse(status_code=202, content=resp_data)
 
 
 # ---------------------------------------------------------------------------
