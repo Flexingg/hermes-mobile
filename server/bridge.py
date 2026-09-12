@@ -1865,6 +1865,181 @@ def coach_push(body: dict | None = None):
     return {"ok": True, "devices": sent, "message": budget["message"]}
 
 
+# ---------------------------------------------------------------------------
+# Hermes-driven log reconciliation (R15-1)
+#
+# The launcher posts the day's note lines; the `lumen` agent classifies each one
+# (weight / water / food / ignore) and applies it through its SparkyFitness MCP,
+# then writes strict JSON that we return to the client.
+# ---------------------------------------------------------------------------
+
+SYNC_AGENT_TIMEOUT = int(os.environ.get("MER_SYNC_TIMEOUT_SECONDS", "180") or "180")
+SYNC_AGENT_PROFILE = os.environ.get("MER_SYNC_PROFILE", "").strip()
+
+
+def _sync_profile() -> str:
+    return SYNC_AGENT_PROFILE or _chat_profile() or "lumen"
+
+
+def _build_sync_prompt(date_str: str, entries: list, removed_markers: list, out_path: str) -> str:
+    lines = []
+    for e in entries:
+        if not isinstance(e, dict):
+            continue
+        idx = e.get("lineIndex")
+        t = str(e.get("time") or "?").strip()
+        text = str(e.get("text") or "").strip()
+        marker = e.get("marker")
+        if isinstance(marker, dict) and marker.get("id"):
+            marker_txt = (
+                f" | existing record: kind={marker.get('kind')} "
+                f"id={marker.get('id')} value={marker.get('value')}"
+            )
+        else:
+            marker_txt = " | no existing record"
+        lines.append(f"- lineIndex={idx} | time={t} | text: {text!r}{marker_txt}")
+    listing = "\n".join(lines) if lines else "(none)"
+
+    gone = []
+    for m in removed_markers or []:
+        if isinstance(m, dict) and m.get("id"):
+            gone.append(f"- kind={m.get('kind')} id={m.get('id')}")
+    gone_txt = "\n".join(gone) if gone else "(none)"
+
+    return f"""Reconcile the user's daily log into SparkyFitness using your SparkyFitness MCP tools.
+
+Date: {date_str}
+
+Note lines to reconcile:
+{listing}
+
+Records whose note line no longer exists (delete these):
+{gone_txt}
+
+For EACH line above decide exactly one kind: weight | water | food | ignored
+(ignored = task lines "- [ ]", headings, mood/sleep prose, or anything that was not consumed or logged).
+
+Then act with the MCP:
+- weight -> sparky_manage_checkin, action=log_biometrics (entry_date, weight=<number>, weight_unit="lbs" or "kg" exactly as written)
+- water  -> sparky_manage_food, action=log_water (amount_ml = oz x 29.5735, entry_date)
+- food   -> resolve nutrition in THIS priority order and record which source you used:
+            1) the user's own history first: sparky_manage_food action=search_food (internal)
+            2) sparky_manage_food action=lookup_food_nutrition
+            3) sparky_manage_food action=search_food search_type=broad, then action=log_food with the returned food_id/variant_id
+            4) a web search for branded/packaged items the databases don't know
+            5) last resort only: action=create_food with a clearly labelled estimate
+            Then action=log_food with meal_type from the line's time
+            (breakfast <11:00, lunch <15:00, dinner <20:00, else snacks).
+            Parse leading quantities/units: "1 egg"=1 piece, "two scoops of X"=2 scoop,
+            "12 oz of X"=12 oz, "half scoop"=0.5 scoop; default 1 serving.
+- If a line has an existing record and its value changed: replace that record
+  (delete + re-log, or action=update_entry when only quantity/unit changed).
+- Delete every record listed under "Records whose note line no longer exists".
+- A 404 / "not found" on ANY delete means it is already gone = SUCCESS, never a failure.
+- Never invent ids: every sparkyId must come from an actual tool response.
+
+Then write STRICT JSON (no markdown fences, no surrounding prose) to this exact path:
+{out_path}
+
+Schema:
+{{"ok": true,
+ "results": [{{"lineIndex": <int>, "kind": "weight|water|food|ignored",
+   "action": "created|updated|deleted|skipped|unchanged", "sparkyId": <string|null>,
+   "value": "<what was logged>", "detail": "<short source/reason>"}}],
+ "summary": {{"created": <int>, "updated": <int>, "deleted": <int>, "skipped": <int>, "failed": <int>}},
+ "messages": ["<short notes>"]}}
+
+Include exactly one result per input lineIndex, plus one per deleted record (use its kind).
+Keep "detail" short: "own history" | "usda match" | "web search" | "estimate" | "task line" | etc.
+When the file is written, reply with a single one-line summary."""
+
+
+def _run_sync_agent(prompt: str, timeout: int) -> tuple:
+    cmd = [HERMES_BIN, "chat", "-q", prompt, "-p", _sync_profile()]
+    try:
+        proc = subprocess.run(
+            cmd, capture_output=True, text=True, stdin=subprocess.DEVNULL,
+            timeout=timeout, start_new_session=True,
+        )
+        return True, (proc.stdout or "") + (proc.stderr or "")
+    except subprocess.TimeoutExpired:
+        return False, "agent timeout"
+    except Exception as e:  # noqa: BLE001
+        return False, f"agent error: {e}"
+
+
+@app.get("/api/v1/coach/sync-logs/health")
+def coach_sync_health():
+    return {"ok": True, "profile": _sync_profile(), "mcp": True}
+
+
+@app.post("/api/v1/coach/sync-logs")
+async def coach_sync_logs(body: dict | None = None):
+    import uuid
+
+    body = body or {}
+    date_str = str(body.get("date") or _coach_now().strftime("%Y-%m-%d")).strip()
+    entries = body.get("entries") or []
+    removed = body.get("removedMarkers") or []
+    zero = {"created": 0, "updated": 0, "deleted": 0, "skipped": 0, "failed": 0}
+    if not isinstance(entries, list) or not entries:
+        return {"ok": True, "results": [], "summary": zero, "messages": []}
+
+    try:
+        timeout = int(body.get("timeoutSeconds") or SYNC_AGENT_TIMEOUT)
+    except Exception:  # noqa: BLE001
+        timeout = SYNC_AGENT_TIMEOUT
+    timeout = max(30, min(timeout, 600))
+
+    out_path = f"/tmp/lumen-sync-{uuid.uuid4().hex}.json"
+    if os.path.exists(out_path):
+        try:
+            os.remove(out_path)
+        except OSError:
+            pass
+
+    prompt = _build_sync_prompt(date_str, entries, removed, out_path)
+    loop = asyncio.get_running_loop()
+    ok, output = await loop.run_in_executor(None, _run_sync_agent, prompt, timeout)
+
+    payload = None
+    try:
+        if os.path.exists(out_path):
+            with open(out_path, "r", encoding="utf-8") as fh:
+                payload = json.loads(fh.read())
+    except Exception:  # noqa: BLE001
+        payload = None
+    finally:
+        try:
+            os.remove(out_path)
+        except OSError:
+            pass
+
+    if not isinstance(payload, dict) or not isinstance(payload.get("results"), list):
+        return JSONResponse(
+            status_code=502,
+            content={
+                "ok": False,
+                "error": "agent produced no result" if ok else output,
+                "stdout": (output or "")[-1500:],
+            },
+        )
+
+    results = payload["results"]
+    if not isinstance(payload.get("summary"), dict):
+        summary = dict(zero)
+        for r in results:
+            act = str((r or {}).get("action") or "").lower()
+            if act in ("created", "updated", "deleted", "skipped"):
+                summary[act] += 1
+            elif act == "failed":
+                summary["failed"] += 1
+        payload["summary"] = summary
+    payload.setdefault("ok", True)
+    payload.setdefault("messages", [])
+    return payload
+
+
 @app.get("/healthz")
 def healthz():
     return {"ok": True, "hermes": str(HERMES), "db": STATE_DB.exists()}
