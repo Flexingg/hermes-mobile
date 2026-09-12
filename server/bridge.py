@@ -1922,20 +1922,46 @@ For EACH line above decide exactly one kind: weight | water | food | ignored
 Then act with the MCP:
 - weight -> sparky_manage_checkin, action=log_biometrics (entry_date, weight=<number>, weight_unit="lbs" or "kg" exactly as written)
 - water  -> sparky_manage_food, action=log_water (amount_ml = oz x 29.5735, entry_date)
-- food   -> resolve nutrition in THIS priority order and record which source you used:
-            1) the user's own history first: sparky_manage_food action=search_food (internal)
-            2) sparky_manage_food action=lookup_food_nutrition
-            3) sparky_manage_food action=search_food search_type=broad, then action=log_food with the returned food_id/variant_id
-            4) a web search for branded/packaged items the databases don't know
-            5) last resort only: action=create_food with a clearly labelled estimate
-            Then action=log_food with meal_type from the line's time
-            (breakfast <11:00, lunch <15:00, dinner <20:00, else snacks).
-            Parse leading quantities/units: "1 egg"=1 piece, "two scoops of X"=2 scoop,
-            "12 oz of X"=12 oz, "half scoop"=0.5 scoop; default 1 serving.
-- If a line has an existing record and its value changed: replace that record
-  (delete + re-log, or action=update_entry when only quantity/unit changed).
-- Delete every record listed under "Records whose note line no longer exists".
-- A 404 / "not found" on ANY delete means it is already gone = SUCCESS, never a failure.
+
+FOOD — the hard part. Getting the QUANTITY/UNIT right matters more than the food match:
+  1) Resolve a food in this priority order and record the source:
+     a. the user's own catalog/history first: sparky_manage_food action=search_food (internal)
+     b. sparky_manage_food action=lookup_food_nutrition
+     c. action=search_food search_type=broad -> use the returned food_id/variant_id
+     d. a web search for branded/packaged items the databases don't know
+     e. last resort: action=create_food — and when you create one, give it a REAL serving
+        (e.g. serving "1 piece = 140 kcal" or "100 g = 340 kcal"), never a 1-gram serving.
+  2) Work out what ONE SERVING of that food actually is, from the lookup text
+     (e.g. "57g: 140 kcal" or "Serving Size: 57 g / Energy: 140 kcal" = nutrition per 57 g).
+  3) Convert the human quantity in the note into that food's OWN unit:
+     - slice of bread/toast ~= 40 g; 1 egg ~= 50 g; 1 piece (tortilla/sausage/breadstick)
+       -> use the food's per-piece serving when the catalog defines one;
+     - 1 cup ~= 240 ml (cooked veg ~= 125 g, cooked grains ~= 160 g); 1 tbsp ~= 15 g; 1 tsp ~= 5 g;
+       1 oz ~= 28.35 g; ml ~= 1 g for water-based liquids;
+     - 1 scoop ~= 30 g unless the product states otherwise.
+     Then log in the unit the matched variant actually defines. If it is per-100 g, pass
+     quantity=<grams>, unit="g". If it defines "piece"/"slice", you may pass that unit and count.
+     NEVER pass a unit the variant does not define, and NEVER treat a human unit
+     ("slice", "cup", "piece") as one whole 100 g serving.
+     Worked example: "3 slices of apple bread" with a catalog food of 100 g = 340 kcal
+     -> 3 slices ~= 120 g -> quantity=120, unit="g" -> ~408 kcal (NOT 1020 kcal, NOT 3 kcal).
+  4) Then action=log_food(food_name, quantity, unit, meal_type from the time
+     (breakfast <11:00, lunch <15:00, dinner <20:00, else snacks), entry_date).
+
+VERIFY EVERY FOOD ENTRY (mandatory):
+  - After logging, call action=list_diary(entry_date) and read back each entry you created.
+  - Compare the stored kcal with what that amount should be. Anchors: bread slice 60-150 kcal;
+    egg 50-90; cup of cooked veg 25-70; scoop of protein 100-180; scoop of pre-workout 0-15;
+    8 oz milk 100-180; pizza slice 200-400.
+  - If the stored kcal is off by more than ~15% from your expected value, OR is implausible
+    (e.g. a solid food logged at <20 kcal, or 3 slices logged as ~3 g), DELETE that entry and
+    re-log it correctly (one retry), then verify again.
+  - Also verify entries that already existed for a line (marker present): if the stored kcal is
+    mis-scaled, fix it the same way even though the note value did not change.
+  - Put the final kcal in "value" (e.g. "3 slices ~= 120 g -> 408 kcal") and mention any repair
+    in "detail" (e.g. "internal match; corrected serving").
+
+- Deletes: 404 / "not found" on ANY delete means it is already gone = SUCCESS, never a failure.
 - Never invent ids: every sparkyId must come from an actual tool response.
 
 Then write STRICT JSON (no markdown fences, no surrounding prose) to this exact path:
@@ -1945,12 +1971,11 @@ Schema:
 {{"ok": true,
  "results": [{{"lineIndex": <int>, "kind": "weight|water|food|ignored",
    "action": "created|updated|deleted|skipped|unchanged", "sparkyId": <string|null>,
-   "value": "<what was logged>", "detail": "<short source/reason>"}}],
+   "value": "<amount + final kcal>", "detail": "<short source/reason>"}}],
  "summary": {{"created": <int>, "updated": <int>, "deleted": <int>, "skipped": <int>, "failed": <int>}},
- "messages": ["<short notes>"]}}
+ "messages": ["<short notes, including any entries you corrected>"]}}
 
 Include exactly one result per input lineIndex, plus one per deleted record (use its kind).
-Keep "detail" short: "own history" | "usda match" | "web search" | "estimate" | "task line" | etc.
 When the file is written, reply with a single one-line summary."""
 
 
