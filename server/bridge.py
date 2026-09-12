@@ -24,7 +24,11 @@ import sqlite3
 import subprocess
 import threading
 import time
+import urllib.error
+import urllib.request
 import yaml
+import zoneinfo
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 import psutil
@@ -58,13 +62,34 @@ GROUP_STORE = HERMES / "mercury_groups.json"
 MER_VAULT_PATH = os.environ.get("MER_VAULT_PATH", "")
 # Default agent profile for chat ("" = default profile).
 MER_CHAT_PROFILE = os.environ.get("MER_CHAT_PROFILE", "")
+# SparkyFitness coach budget integration (R10-1). Never log or return SPARKY_TOKEN.
+SPARKY_BASE_URL = os.environ.get("SPARKY_BASE_URL", "https://fit.randalls.cc")
+SPARKY_TOKEN = os.environ.get("SPARKY_TOKEN", "")
+MER_COACH_PUSH_TIMES = os.environ.get("MER_COACH_PUSH_TIMES", "")
+MER_COACH_TZ = os.environ.get("MER_COACH_TZ", "")
 
 
 def _chat_profile() -> str | None:
     val = os.environ.get("MER_CHAT_PROFILE", MER_CHAT_PROFILE).strip()
     return val or None
 
-app = FastAPI(title="Hermes Mobile bridge", version="1.0")
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    times_str = (os.environ.get("MER_COACH_PUSH_TIMES") or MER_COACH_PUSH_TIMES or "").strip()
+    task = None
+    if times_str:
+        task = asyncio.create_task(_coach_scheduler_loop(times_str))
+    yield
+    if task:
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
+
+app = FastAPI(title="Hermes Mobile bridge", version="1.0", lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"]
 )
@@ -1524,6 +1549,313 @@ def terminal_run(body: dict):
         }
     except Exception as e:  # noqa: BLE001
         raise HTTPException(status_code=500, detail=f"failed: {e}")
+
+
+# ---------------------------------------------------------------------------
+# Lumen Coach budget & push endpoints (R10-1)
+# ---------------------------------------------------------------------------
+class SparkyConfigError(Exception):
+    pass
+
+
+class SparkyUnreachableError(Exception):
+    pass
+
+
+def _coach_now() -> dt.datetime:
+    tz_name = (os.environ.get("MER_COACH_TZ") or MER_COACH_TZ or "").strip()
+    if tz_name:
+        try:
+            return dt.datetime.now(zoneinfo.ZoneInfo(tz_name))
+        except Exception:
+            pass
+    return dt.datetime.now().astimezone()
+
+
+def _first_non_none(d: dict, *keys):
+    for k in keys:
+        if k in d and d[k] is not None:
+            return d[k]
+    return None
+
+
+def _fetch_sparky_json(endpoint: str, base_url: str, token: str, timeout: float = 5.0) -> dict | list | None:
+    url = f"{base_url}{endpoint}"
+    req = urllib.request.Request(
+        url,
+        headers={
+            "Authorization": f"Bearer {token}",
+            "X-API-Key": token,
+            "User-Agent": "HermesMobile/1.0",
+            "Accept": "application/json",
+        },
+    )
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        if 200 <= resp.status < 300:
+            raw = resp.read().decode("utf-8")
+            return json.loads(raw) if raw else {}
+    return None
+
+
+def _compute_coach_level_and_message(
+    consumed_kcal: int,
+    goal_kcal: int,
+    remaining_kcal: int,
+    percent: float,
+    protein_remaining: float | None,
+    now: dt.datetime,
+    is_today: bool,
+) -> tuple[str, str]:
+    if percent >= 100.0:
+        level = "OVER"
+        over = max(0, consumed_kcal - goal_kcal)
+        over_text = f"{over:,} over" if over > 0 else "0 left"
+        msg = f"🔴 {consumed_kcal:,} / {goal_kcal:,} kcal — {over_text}. Ease off for the rest of today."
+    elif percent >= 85.0:
+        level = "NEAR_LIMIT"
+        msg = f"🟠 {consumed_kcal:,} / {goal_kcal:,} kcal — only {remaining_kcal:,} left. Choose the next meal carefully."
+    elif percent >= 60.0:
+        level = "WATCH"
+        protein_part = ""
+        if protein_remaining is not None and protein_remaining > 0:
+            protein_part = f" ({round(protein_remaining):,}g protein to go)"
+        msg = f"🟡 {consumed_kcal:,} / {goal_kcal:,} kcal · {remaining_kcal:,} left{protein_part}"
+    elif is_today and now.hour >= 12 and consumed_kcal > 0:
+        level = "MIDDAY_CHECK"
+        msg = f"🕛 Halfway through the day: {consumed_kcal:,} / {goal_kcal:,} kcal · {remaining_kcal:,} left."
+    else:
+        level = "ON_TRACK"
+        if goal_kcal > 0:
+            msg = f"🟢 {consumed_kcal:,} / {goal_kcal:,} kcal · {remaining_kcal:,} left"
+        else:
+            msg = f"🟢 {consumed_kcal:,} kcal consumed"
+
+    return level, msg
+
+
+def _get_coach_budget(date_str: str | None = None) -> dict:
+    base_url = (os.environ.get("SPARKY_BASE_URL") or SPARKY_BASE_URL or "https://fit.randalls.cc").rstrip("/")
+    token = (os.environ.get("SPARKY_TOKEN") or SPARKY_TOKEN or "").strip()
+    if not token:
+        raise SparkyConfigError("sparky not configured")
+
+    now = _coach_now()
+    today_str = now.strftime("%Y-%m-%d")
+    target_date = date_str.strip() if date_str else today_str
+
+    # 1. Goals (primary /for-date, fallback /by-date)
+    goals_data = None
+    for ep in [f"/api/goals/for-date?date={target_date}", f"/api/goals/by-date/{target_date}"]:
+        try:
+            raw = _fetch_sparky_json(ep, base_url, token)
+            if raw is not None:
+                goals_data = raw.get("data", raw) if isinstance(raw, dict) else raw
+                break
+        except urllib.error.HTTPError as he:
+            if he.code in (401, 403):
+                raise SparkyUnreachableError("sparky unreachable")
+            continue
+        except Exception as e:
+            raise SparkyUnreachableError(f"sparky unreachable: {e}")
+
+    # 2. Nutrition
+    nutrition_data = None
+    try:
+        raw = _fetch_sparky_json(f"/api/food-entries/nutrition/today?date={target_date}", base_url, token)
+        if raw is not None:
+            nutrition_data = raw.get("data", raw) if isinstance(raw, dict) else raw
+    except urllib.error.HTTPError as he:
+        if he.code in (401, 403):
+            raise SparkyUnreachableError("sparky unreachable")
+    except Exception as e:
+        raise SparkyUnreachableError(f"sparky unreachable: {e}")
+
+    if goals_data is None and nutrition_data is None:
+        raise SparkyUnreachableError("sparky unreachable")
+
+    # 3. Water (tolerate error/null)
+    water_data = None
+    try:
+        raw = _fetch_sparky_json(f"/api/measurements/water-intake/{target_date}", base_url, token)
+        if raw is not None:
+            water_data = raw.get("data", raw) if isinstance(raw, dict) else raw
+    except Exception:
+        water_data = None
+
+    goals = goals_data if isinstance(goals_data, dict) else {}
+    nutrition = nutrition_data if isinstance(nutrition_data, dict) else {}
+    water = water_data if isinstance(water_data, dict) else {}
+
+    cal_goal = _first_non_none(goals, "calories", "total_calories")
+    p_goal = _first_non_none(goals, "protein", "total_protein", "protein_g", "proteinG")
+    w_goal = _first_non_none(goals, "water_goal_ml", "water_goal", "water_ml", "waterMl")
+
+    cal_consumed = _first_non_none(nutrition, "total_calories", "calories")
+    p_consumed = _first_non_none(nutrition, "total_protein", "protein", "protein_g", "proteinG")
+    w_consumed = _first_non_none(water, "water_ml", "amount", "total_amount")
+
+    goal_kcal = int(round(float(cal_goal))) if cal_goal is not None else 0
+    consumed_kcal = int(round(float(cal_consumed))) if cal_consumed is not None else 0
+    remaining_kcal = max(0, goal_kcal - consumed_kcal)
+
+    percent = round((consumed_kcal / goal_kcal) * 100.0, 1) if goal_kcal > 0 else 0.0
+
+    if p_consumed is not None:
+        try:
+            protein_consumed = round(float(p_consumed), 1)
+        except (ValueError, TypeError):
+            protein_consumed = 0.0
+    elif p_goal is not None:
+        protein_consumed = 0.0
+    else:
+        protein_consumed = None
+
+    if p_goal is not None:
+        try:
+            protein_goal = round(float(p_goal), 1)
+        except (ValueError, TypeError):
+            protein_goal = None
+    else:
+        protein_goal = None
+
+    protein_remaining = (
+        max(0.0, round(protein_goal - (protein_consumed or 0.0), 1))
+        if protein_goal is not None
+        else None
+    )
+
+    if w_consumed is not None:
+        try:
+            water_ml = round(float(w_consumed), 2)
+        except (ValueError, TypeError):
+            water_ml = 0.0
+    elif w_goal is not None:
+        water_ml = 0.0
+    else:
+        water_ml = None
+
+    if w_goal is not None:
+        try:
+            water_goal_ml = round(float(w_goal), 2)
+        except (ValueError, TypeError):
+            water_goal_ml = None
+    else:
+        water_goal_ml = None
+
+    water_remaining_ml = (
+        max(0.0, round(water_goal_ml - (water_ml or 0.0), 2))
+        if water_goal_ml is not None
+        else None
+    )
+
+    is_today = (target_date == today_str)
+    level, message = _compute_coach_level_and_message(
+        consumed_kcal=consumed_kcal,
+        goal_kcal=goal_kcal,
+        remaining_kcal=remaining_kcal,
+        percent=percent,
+        protein_remaining=protein_remaining,
+        now=now,
+        is_today=is_today,
+    )
+
+    return {
+        "date": target_date,
+        "consumedKcal": consumed_kcal,
+        "goalKcal": goal_kcal,
+        "remainingKcal": remaining_kcal,
+        "percent": percent,
+        "proteinConsumed": protein_consumed,
+        "proteinGoal": protein_goal,
+        "proteinRemaining": protein_remaining,
+        "waterMl": water_ml,
+        "waterGoalMl": water_goal_ml,
+        "waterRemainingMl": water_remaining_ml,
+        "level": level,
+        "message": message,
+    }
+
+
+def _run_scheduled_coach_push() -> None:
+    try:
+        budget = _get_coach_budget()
+        tokens = _load_tokens()
+        if not tokens:
+            print("[coach] scheduled push: no registered devices", flush=True)
+            return
+        sent = _send_push("Lumen Coach", budget["message"], {"type": "coach_budget"})
+        print(f"[coach] scheduled push sent to {sent} devices: {budget['message']}", flush=True)
+    except Exception as e:
+        print(f"[coach] scheduled push failed: {e}", flush=True)
+
+
+async def _coach_scheduler_loop(times_str: str) -> None:
+    slots = {s.strip() for s in times_str.split(",") if s.strip()}
+    if not slots:
+        return
+    tz_name = (os.environ.get("MER_COACH_TZ") or MER_COACH_TZ or "").strip()
+    print(f"[coach] scheduler started with slots={sorted(slots)} (tz={tz_name or 'system'})", flush=True)
+    fired_date: str = ""
+    fired_slots: set[str] = set()
+
+    while True:
+        try:
+            now = _coach_now()
+            sleep_s = max(1, 60 - now.second)
+            await asyncio.sleep(sleep_s)
+
+            now = _coach_now()
+            today_str = now.strftime("%Y-%m-%d")
+            if today_str != fired_date:
+                fired_date = today_str
+                fired_slots.clear()
+
+            current_slot = now.strftime("%H:%M")
+            if current_slot in slots and current_slot not in fired_slots:
+                fired_slots.add(current_slot)
+                print(f"[coach] scheduled slot {current_slot} reached for {today_str}, running push...", flush=True)
+                loop = asyncio.get_running_loop()
+                await loop.run_in_executor(None, _run_scheduled_coach_push)
+        except asyncio.CancelledError:
+            break
+        except Exception as e:
+            print(f"[coach] scheduler error: {e}", flush=True)
+            await asyncio.sleep(5)
+
+
+@app.get("/api/v1/coach/budget")
+def coach_budget(date: str | None = None):
+    try:
+        return _get_coach_budget(date)
+    except SparkyConfigError:
+        return JSONResponse(status_code=503, content={"error": "sparky not configured"})
+    except SparkyUnreachableError:
+        return JSONResponse(status_code=503, content={"error": "sparky unreachable"})
+    except Exception:
+        return JSONResponse(status_code=503, content={"error": "sparky unreachable"})
+
+
+@app.post("/api/v1/coach/push")
+def coach_push(body: dict | None = None):
+    try:
+        req_date = (body or {}).get("date") if body else None
+        budget = _get_coach_budget(req_date)
+    except SparkyConfigError:
+        return JSONResponse(status_code=503, content={"error": "sparky not configured"})
+    except SparkyUnreachableError:
+        return JSONResponse(status_code=503, content={"error": "sparky unreachable"})
+    except Exception:
+        return JSONResponse(status_code=503, content={"error": "sparky unreachable"})
+
+    tokens = _load_tokens()
+    if not tokens:
+        return JSONResponse(
+            status_code=200,
+            content={"ok": False, "devices": 0, "error": "no registered devices"},
+        )
+
+    sent = _send_push("Lumen Coach", budget["message"], {"type": "coach_budget"})
+    return {"ok": True, "devices": sent, "message": budget["message"]}
 
 
 @app.get("/healthz")
