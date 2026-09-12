@@ -1933,20 +1933,26 @@ FOOD — the hard part. Getting the QUANTITY/UNIT right matters more than the fo
         (e.g. serving "1 piece = 140 kcal" or "100 g = 340 kcal"), never a 1-gram serving.
   2) Work out what ONE SERVING of that food actually is, from the lookup text
      (e.g. "57g: 140 kcal" or "Serving Size: 57 g / Energy: 140 kcal" = nutrition per 57 g).
-  3) Convert the human quantity in the note into that food's OWN unit:
-     - slice of bread/toast ~= 40 g; 1 egg ~= 50 g; 1 piece (tortilla/sausage/breadstick)
-       -> use the food's per-piece serving when the catalog defines one;
-     - 1 cup ~= 240 ml (cooked veg ~= 125 g, cooked grains ~= 160 g); 1 tbsp ~= 15 g; 1 tsp ~= 5 g;
-       1 oz ~= 28.35 g; ml ~= 1 g for water-based liquids;
-     - 1 scoop ~= 30 g unless the product states otherwise.
-     Then log in the unit the matched variant actually defines. If it is per-100 g, pass
-     quantity=<grams>, unit="g". If it defines "piece"/"slice", you may pass that unit and count.
-     NEVER pass a unit the variant does not define, and NEVER treat a human unit
-     ("slice", "cup", "piece") as one whole 100 g serving.
-     Worked example: "3 slices of apple bread" with a catalog food of 100 g = 340 kcal
-     -> 3 slices ~= 120 g -> quantity=120, unit="g" -> ~408 kcal (NOT 1020 kcal, NOT 3 kcal).
-  4) Then action=log_food(food_name, quantity, unit, meal_type from the time
-     (breakfast <11:00, lunch <15:00, dinner <20:00, else snacks), entry_date).
+  3) Convert the human quantity in the note into the variant's OWN serving_unit, which is ALWAYS
+     the unit shown in the lookup text ("57g: 140 kcal" -> serving unit g; "240ml: 120 kcal" -> ml).
+     SparkyFitness computes an entry as quantity / serving_size x calories, so if you pass a
+     different unit the number is silently mis-scaled. This is the #1 cause of wrong logs:
+       WRONG: log_food(food_name="Sourdough Bread (Panera Bread)", quantity=1, unit="piece")
+              -> Sparky computes 1 / 57 x 140 = 2 kcal   (the app shows "1 piece, 2 Cal")
+       RIGHT: log_food(food_name="Sourdough Bread (Panera Bread)", quantity=57, unit="g")
+              -> 57 / 57 x 140 = 140 kcal
+       WRONG: log_food(food_name="...PROTEIN POWDER...", quantity=1, unit="serving")   (serving_size 70 g)
+              -> 1 / 70 x 280 = 4 kcal
+       RIGHT: quantity=70, unit="g" -> 280 kcal
+     Convert with these weights: slice of bread/toast ~= 40 g (or the catalog's own piece size);
+     1 egg ~= 50 g; 1 cup ~= 240 ml (cooked veg ~= 125 g, cooked grains ~= 160 g); 1 tbsp ~= 15 g;
+     1 tsp ~= 5 g; 1 oz ~= 28.35 g; 1 scoop ~= 30 g unless the product states otherwise;
+     ml ~= 1 g for water-based liquids.
+     NEVER pass "piece", "slice", "serving" or "cup" unless the variant's serving_unit is EXACTLY
+     that word. When in doubt, pass grams.
+  4) action=log_food(food_name, quantity=<in the variant's unit>, unit=<that unit>, meal_type from the
+     time (breakfast <11:00, lunch <15:00, dinner <20:00, else snacks), entry_date).
+     Also report the kcal you expect for the line as "expectedKcal" in the result JSON.
 
 VERIFY EVERY FOOD ENTRY (mandatory):
   - After logging, call action=list_diary(entry_date) and read back each entry you created.
@@ -1971,7 +1977,8 @@ Schema:
 {{"ok": true,
  "results": [{{"lineIndex": <int>, "kind": "weight|water|food|ignored",
    "action": "created|updated|deleted|skipped|unchanged", "sparkyId": <string|null>,
-   "value": "<amount + final kcal>", "detail": "<short source/reason>"}}],
+   "value": "<amount + final kcal>", "detail": "<short source/reason>",
+   "expectedKcal": <number|null, your expected kcal for this line>}}],
  "summary": {{"created": <int>, "updated": <int>, "deleted": <int>, "skipped": <int>, "failed": <int>}},
  "messages": ["<short notes, including any entries you corrected>"]}}
 
@@ -1991,6 +1998,122 @@ def _run_sync_agent(prompt: str, timeout: int) -> tuple:
         return False, "agent timeout"
     except Exception as e:  # noqa: BLE001
         return False, f"agent error: {e}"
+
+
+@app.get("/api/v1/coach/sync-logs/health")
+def coach_sync_health():
+    return {"ok": True, "profile": _sync_profile(), "mcp": True}
+
+
+# --- Deterministic post-sync verification -------------------------------------------------
+# SparkyFitness computes a diary entry as: quantity / serving_size * calories.
+# If the entry's unit does not match the variant's serving_unit the value is silently
+# mis-scaled (e.g. 1 "piece" against a 57 g variant => 1/57*140 = 2 kcal). The agent
+# cannot see that from list_diary, so we verify against the REST rows ourselves and
+# ask the agent to repair anything that is off.
+
+def _entry_effective_kcal(entry: dict):
+    try:
+        q = float(entry.get("quantity") or 0)
+        ss = float(entry.get("serving_size") or 0)
+        cal = float(entry.get("calories") or 0)
+    except (TypeError, ValueError):
+        return None
+    if ss <= 0:
+        return None
+    return q / ss * cal
+
+
+def _fetch_diary_rows(date_str: str) -> dict:
+    base_url = (os.environ.get("SPARKY_BASE_URL") or SPARKY_BASE_URL or "https://fit.randalls.cc").rstrip("/")
+    token = (os.environ.get("SPARKY_TOKEN") or SPARKY_TOKEN or "").strip()
+    if not token:
+        return {}
+    try:
+        rows = _fetch_sparky_json(
+            f"/api/food-entries?selectedDate={date_str}", base_url, token, timeout=15.0
+        )
+    except Exception:  # noqa: BLE001
+        return {}
+    out = {}
+    if isinstance(rows, list):
+        for r in rows:
+            if isinstance(r, dict) and r.get("id"):
+                out[str(r["id"])] = {
+                    "name": r.get("food_name"),
+                    "quantity": r.get("quantity"),
+                    "unit": r.get("unit"),
+                    "serving_size": r.get("serving_size"),
+                    "serving_unit": r.get("serving_unit"),
+                    "effectiveKcal": _entry_effective_kcal(r),
+                }
+    return out
+
+
+def _verify_sync_results(date_str: str, results: list) -> tuple:
+    """Returns (checked, problems). Empty problems when we cannot verify at all."""
+    diary = _fetch_diary_rows(date_str)
+    if not diary:
+        return [], []
+    checked, problems = [], []
+    for r in results:
+        if not isinstance(r, dict):
+            continue
+        sid = r.get("sparkyId")
+        if not sid or str(sid) not in diary:
+            continue
+        info = diary[str(sid)]
+        eff = info.get("effectiveKcal")
+        try:
+            exp = float(r["expectedKcal"]) if r.get("expectedKcal") is not None else None
+        except (TypeError, ValueError):
+            exp = None
+        checked.append({"sparkyId": sid, "name": info.get("name"),
+                        "effectiveKcal": None if eff is None else round(eff, 1),
+                        "expectedKcal": exp})
+        if eff is None:
+            continue
+        off = abs(eff - exp) / exp if (exp and exp > 0) else 0.0
+        implausible = 0 < eff < 15 and (exp is None or exp > 30)
+        if (exp and exp > 0 and off > 0.20) or implausible:
+            problems.append({
+                "sparkyId": str(sid), "lineIndex": r.get("lineIndex"), "name": info.get("name"),
+                "loggedQuantity": info.get("quantity"), "loggedUnit": info.get("unit"),
+                "variantServingSize": info.get("serving_size"),
+                "variantServingUnit": info.get("serving_unit"),
+                "effectiveKcal": round(eff, 1), "expectedKcal": exp,
+            })
+    return checked, problems
+
+
+def _build_repair_prompt(date_str: str, problems: list, out_path: str) -> str:
+    items = "\n".join(
+        f"- entry id {p['sparkyId']} ({p['name']}): logged as {p['loggedQuantity']} {p['loggedUnit']} "
+        f"which Sparky computes as {p['effectiveKcal']} kcal; the variant is "
+        f"{p['variantServingSize']} {p['variantServingUnit']} per serving and it should be about "
+        f"{p['expectedKcal']} kcal."
+        for p in problems
+    )
+    return f"""Some food entries you logged for {date_str} are mis-scaled and must be fixed.
+
+SparkyFitness computes an entry as quantity / serving_size * calories, so the logged quantity MUST
+be expressed in the variant's own serving_unit (usually "g" or "ml"). Passing a human unit such as
+"piece", "slice", "serving" or "cup" against a gram-based variant silently divides by the serving size.
+
+Mis-scaled entries:
+{items}
+
+For EACH entry above: delete it (sparky_manage_food action=delete_entry, entry_type="food_entry")
+and re-log the same food with the quantity converted into the variant's serving_unit
+(e.g. a 57 g sourdough slice -> quantity=57, unit="g"; a 70 g protein serving -> quantity=70, unit="g").
+Keep the same meal type and date. A 404/"not found" on delete means it is already gone = success.
+
+Then write STRICT JSON to this exact path: {out_path}
+Schema: {{"ok": true,
+ "results": [{{"sparkyId": "<new entry id>", "action": "created", "oldSparkyId": "<deleted id>",
+   "value": "<amount + kcal>", "detail": "serving repair", "expectedKcal": <number>}}],
+ "messages": ["<what you corrected>"]}}
+Reply with one short line when done."""
 
 
 @app.get("/api/v1/coach/sync-logs/health")
@@ -2062,6 +2185,63 @@ async def coach_sync_logs(body: dict | None = None):
         payload["summary"] = summary
     payload.setdefault("ok", True)
     payload.setdefault("messages", [])
+
+    # Deterministic check: Sparky scales by quantity / serving_size * calories, which the
+    # agent cannot see via list_diary. Verify against the real rows and repair once.
+    checked, problems = _verify_sync_results(date_str, results)
+    repaired = 0
+    if problems:
+        repair_path = f"/tmp/lumen-sync-repair-{uuid.uuid4().hex}.json"
+        if os.path.exists(repair_path):
+            try:
+                os.remove(repair_path)
+            except OSError:
+                pass
+        repair_prompt = _build_repair_prompt(date_str, problems, repair_path)
+        await loop.run_in_executor(None, _run_sync_agent, repair_prompt, timeout)
+        repair_payload = None
+        try:
+            if os.path.exists(repair_path):
+                with open(repair_path, "r", encoding="utf-8") as fh:
+                    repair_payload = json.loads(fh.read())
+        except Exception:  # noqa: BLE001
+            repair_payload = None
+        finally:
+            try:
+                os.remove(repair_path)
+            except OSError:
+                pass
+
+        if isinstance(repair_payload, dict):
+            fixes = [r for r in (repair_payload.get("results") or []) if isinstance(r, dict)]
+            repaired = len(fixes)
+            if isinstance(repair_payload.get("messages"), list):
+                payload["messages"].extend(str(m) for m in repair_payload["messages"])
+            fixed_old_ids = {str(r.get("oldSparkyId")) for r in fixes if r.get("oldSparkyId")}
+            if fixed_old_ids:
+                results = [r for r in results if str((r or {}).get("sparkyId")) not in fixed_old_ids]
+            results.extend(fixes)
+            payload["results"] = results
+
+            summary = dict(zero)
+            for r in results:
+                act = str((r or {}).get("action") or "").lower()
+                if act in ("created", "updated", "deleted", "skipped"):
+                    summary[act] += 1
+                elif act == "failed":
+                    summary["failed"] += 1
+            payload["summary"] = summary
+        checked, problems = _verify_sync_results(date_str, results)
+
+    payload["verification"] = {
+        "checked": checked,
+        "problems": problems,
+        "repaired": repaired,
+    }
+    if problems:
+        payload["messages"].append(
+            f"WARNING: {len(problems)} entr(ies) are still mis-scaled after repair — check the serving unit."
+        )
     return payload
 
 
