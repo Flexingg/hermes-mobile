@@ -1759,6 +1759,10 @@ def _get_coach_budget(date_str: str | None = None) -> dict:
         is_today=is_today,
     )
 
+    # Water is shown to the user in fluid ounces (internally everything stays ml).
+    def _to_oz(ml_value):
+        return None if ml_value is None else round(float(ml_value) / 29.5735, 1)
+
     return {
         "date": target_date,
         "consumedKcal": consumed_kcal,
@@ -1771,6 +1775,9 @@ def _get_coach_budget(date_str: str | None = None) -> dict:
         "waterMl": water_ml,
         "waterGoalMl": water_goal_ml,
         "waterRemainingMl": water_remaining_ml,
+        "waterOz": _to_oz(water_ml),
+        "waterGoalOz": _to_oz(water_goal_ml),
+        "waterRemainingOz": _to_oz(water_remaining_ml),
         "level": level,
         "message": message,
     }
