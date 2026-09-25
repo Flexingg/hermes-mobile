@@ -151,7 +151,7 @@ keyPassword=…
 
 Without that file the release build falls back to the debug key and warns — never publish that APK.
 CI restores the key from `MERCURY_KEYSTORE_B64` / `MERCURY_KEYSTORE_PASSWORD` and runs
-`apksigner verify --print-certs`, failing unless the DN is `CN=Mercury Messenger` and v1+v2+v3
+`apksigner verify --print-certs`, failing unless the DN is `CN=Mercury Messenger` and the v2+v3
 schemes verify. (Every previous release was signed with the public Android debug key, so anyone could
 build a trojaned in-place update.) Keep one keystore per app so updates install in place.
 

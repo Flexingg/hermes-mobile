@@ -164,7 +164,7 @@ jobs:
             echo "::error::release APK is not signed with the Mercury release key"
             exit 1
           }
-          for scheme in "v1 scheme" "v2 scheme" "v3 scheme"; do
+          for scheme in "v2 scheme" "v3 scheme"; do
             grep -q "Verified using $scheme.*: true" /tmp/certs.txt || {
               echo "::error::$scheme verification missing"
               exit 1

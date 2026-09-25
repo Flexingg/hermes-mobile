@@ -64,6 +64,15 @@ android {
                 storePassword = keystoreProperties.getProperty("storePassword")
                 keyAlias = keystoreProperties.getProperty("keyAlias")
                 keyPassword = keystoreProperties.getProperty("keyPassword")
+                // Without this AGP emits a v2-only APK (v1/v3 default off for
+                // minSdk 24), and the CI gate that asserts the signing schemes
+                // would fail on the very artifact it is meant to bless. v2+v3 is
+                // the modern pair: v3 adds key-rotation support, so a future
+                // keystore change can still install in place. v1 (legacy JAR
+                // signing) is unnecessary — minSdk is 24.
+                enableV1Signing = false
+                enableV2Signing = true
+                enableV3Signing = true
             }
         }
     }
