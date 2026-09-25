@@ -26,7 +26,67 @@ jobs:
         run: flutter analyze
 
       - name: Run tests
-        run: flutter test
+        # Floor, not just a green light: the repo's only test used to be a single
+        # widget assertion that could not fail for any bridge/streaming change.
+        # A drop below the floor (someone deleting tests) fails here.
+        # `set -o pipefail` matters: without it `flutter test | tee` reports tee's
+        # exit status and a failing suite would go green.
+        run: |
+          set -o pipefail
+          flutter test 2>&1 | tee /tmp/flutter-test.log
+          count=$(grep -oE '\+[0-9]+' /tmp/flutter-test.log | tail -1 | tr -d '+')
+          echo "flutter tests passed: ${count:-0}"
+          if [ -z "$count" ] || [ "$count" -lt 24 ]; then
+            echo "::error::expected at least 24 passing Flutter tests, saw '${count:-0}'"
+            exit 1
+          fi
+
+  server-tests:
+    name: Bridge tests & route contract
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install bridge dependencies
+        run: pip install -r server/requirements.txt pytest httpx
+
+      - name: Bridge test suite
+        run: |
+          set -o pipefail
+          cd server
+          python -m pytest tests -q 2>&1 | tee /tmp/pytest.log
+          count=$(grep -oE '[0-9]+ passed' /tmp/pytest.log | tail -1 | grep -oE '^[0-9]+')
+          echo "bridge tests passed: ${count:-0}"
+          if [ -z "$count" ] || [ "$count" -lt 35 ]; then
+            echo "::error::expected at least 35 passing bridge tests, saw '${count:-0}'"
+            exit 1
+          fi
+
+      - name: Route contract (app calls vs bridge routes)
+        run: python3 tools/contract_check.py --verbose
+
+      - name: No committed secrets or finance exports
+        # The repo shipped a gitignored-by-intent finance export at data/ and a
+        # world-readable token in a unit backup. This gate fails if either class
+        # comes back.
+        run: |
+          bad=0
+          for f in data/transactions.json data/categories.json data/rules.json \
+                   android/key.properties server/data; do
+            if git ls-files --error-unmatch "$f" >/dev/null 2>&1; then
+              echo "::error::$f is tracked and must not be"
+              bad=1
+            fi
+          done
+          if git ls-files | grep -nE '\.(jks|keystore)$'; then
+            echo "::error::a keystore is tracked"
+            bad=1
+          fi
+          exit $bad
 
   build-apk:
     name: Build debug APK
@@ -56,7 +116,7 @@ jobs:
     name: Build & publish release APK
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
-    needs: [analyze-test, build-apk]
+    needs: [analyze-test, server-tests, build-apk]
     permissions:
       contents: write
     steps:
@@ -70,10 +130,51 @@ jobs:
       - name: Install dependencies
         run: flutter pub get
 
+      - name: Restore the release keystore
+        # Secret = base64 of ~/.hermes/secrets/mercury-release.jks; password =
+        # the value in ~/.hermes/secrets/mercury-release.pw.
+        env:
+          MERCURY_KEYSTORE_B64: ${{ secrets.MERCURY_KEYSTORE_B64 }}
+          MERCURY_KEYSTORE_PASSWORD: ${{ secrets.MERCURY_KEYSTORE_PASSWORD }}
+        run: |
+          if [ -z "$MERCURY_KEYSTORE_B64" ]; then
+            echo "::error::MERCURY_KEYSTORE_B64 is not configured — refusing to publish a debug-signed APK"
+            exit 1
+          fi
+          echo "$MERCURY_KEYSTORE_B64" | base64 -d > "$RUNNER_TEMP/mercury-release.jks"
+          cat > android/key.properties <<EOF
+          storeFile=$RUNNER_TEMP/mercury-release.jks
+          storePassword=$MERCURY_KEYSTORE_PASSWORD
+          keyAlias=mercury
+          keyPassword=$MERCURY_KEYSTORE_PASSWORD
+          EOF
+
       - name: Build release APK
         run: flutter build apk --release
+
+      - name: Verify the signing certificate
+        # A published APK must be signed by the real key — this is the gate the
+        # repo never had, which is how every previous release shipped with the
+        # public Android debug key.
+        run: |
+          APK=build/app/outputs/flutter-apk/app-release.apk
+          BT=$(ls -d "$ANDROID_HOME"/build-tools/* | sort -V | tail -1)
+          "$BT/apksigner" verify --verbose --print-certs "$APK" | tee /tmp/certs.txt
+          grep -q "CN=Mercury Messenger" /tmp/certs.txt || {
+            echo "::error::release APK is not signed with the Mercury release key"
+            exit 1
+          }
+          for scheme in "v1 scheme" "v2 scheme" "v3 scheme"; do
+            grep -q "Verified using $scheme.*: true" /tmp/certs.txt || {
+              echo "::error::$scheme verification missing"
+              exit 1
+            }
+          done
+          sha256sum "$APK" | tee app-release.apk.sha256
 
       - name: Attach APK to GitHub release
         uses: softprops/action-gh-release@v2
         with:
-          files: build/app/outputs/flutter-apk/app-release.apk
+          files: |
+            build/app/outputs/flutter-apk/app-release.apk
+            app-release.apk.sha256

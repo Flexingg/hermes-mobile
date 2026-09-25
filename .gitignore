@@ -49,6 +49,14 @@ app.*.map.json
 
 # Local finance exports / sensitive data — never commit
 server/data/
+# The same class of file was committed at the repo ROOT (data/*.json held the
+# owner's real transactions, with card last-4s and merchant strings) and shipped
+# in this public repo. Nothing in the app reads it; it is an export artifact.
+data/
+# Gradle build output that got committed by accident
+android/build/
+# Delegated-agent run artifacts (see ~/.hermes/scripts/code_task.py)
+.hermes-runs/
 
 # UI design scratch
 sketches/

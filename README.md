@@ -18,7 +18,9 @@ dynamic-color theming.
 ### 🔌 Connection & Identity
 1. Multi-server profiles (gateway LAN/remote) · 2. Secure token auth (Bearer) · 3. QR pairing (planned)
 · 4. Multiple bots per server (@hermes, @buff_patrick, @homie) · 5. TLS / self-signed cert support
-· 6. Connection health · 7. Auto-reconnect (in HermesRepository).
+**(planned — the bridge is currently plain HTTP; see Security below)** · 6. Connection health
+· 7. Auto-reconnect: the WebSocket opens with exponential backoff (250 ms → 8 s), sends the bearer on
+the handshake and keeps a 20 s ping.
 *Auto-find bridge on LAN:* the connect screen's "Search your network" browses mDNS for
 `_mercury._tcp` (list found bridges, tap to fill the URL); advertise on the host with
 `server/announce_bridge.py` (see `hermes-bridge-announce.service`).
@@ -100,13 +102,71 @@ install and returns live data:
 ```bash
 pip install -r server/requirements.txt
 HERMES_HOME=/home/hermes/.hermes \
-BRIDGE_TOKEN=<your-secret> \
-uvicorn server.bridge:app --host 0.0.0.0 --port 9130
+BRIDGE_TOKEN=<your-secret> \      # REQUIRED — the process exits without it
+BRIDGE_HOST=127.0.0.1 \           # default 0.0.0.0; see Security
+uvicorn server.bridge:app --port 9130
 ```
 Or install the included systemd user unit (`server/hermes-bridge.service`) to run it persistently.
 
-**App contract** (`HermesRepository`): every `GET`/`POST` under `/api/v1/*` sends
-`Authorization: Bearer <token>`; chat streams over `WS /ws/chat/{sessionId}`.
+**App contract** (`HermesRepository`): every `GET`/`POST`/`PATCH`/`DELETE` under `/api/v1/*` sends an
+`Authorization` header carrying the bridge token; chat streams over `WS /ws/chat/{sessionId}` (the upgrade carries the same
+bearer — an HTTP middleware never runs for the WebSocket scope), and in-app HTML previews are fetched
+from `GET /html/<abs path>?token=…` because a WebView cannot attach a header.
+
+Every failure surfaces the bridge's own `{"detail": …}` message in the app's error strip
+(`ApiFailure`), so a 401 (bad token), a 404 (route does not exist) and a dead socket are
+distinguishable instead of all looking like "nothing happened".
+
+## 🔒 Security
+
+The bridge fronts `~/.hermes` — chat history in `state.db`, `config.yaml`, the memory files — and can
+run shell commands as the `hermes` user. Treat its token as the machine's password.
+
+- **`BRIDGE_TOKEN` is mandatory.** `bridge.py` refuses to start without it. It guards `/api/v1/*`,
+  `/html/*` **and** both WebSockets. (This was the hole: `/html/<path>` was deliberately
+  unauthenticated, so any host on the LAN could `GET /html/home/hermes/.hermes/config.yaml` — and the
+  144 MB `state.db` — with no credential at all.)
+- **`/html/` serves preview types only.** Anything not in `_PREVIEW_TYPES` (`.yaml`, `.env`, `.db`, no
+  extension, …) is a 404 even with a valid token, so the preview route cannot be used as a file
+  downloader. Use `/api/v1/files` (authenticated, root-checked) for downloads.
+- **CORS is off by default.** Set `MER_CORS_ORIGINS` if a browser build needs it; the Android client
+  never did.
+- **Cleartext LAN.** The token and every response cross the network unencrypted. Put the bridge on a
+  Tailscale interface (`BRIDGE_HOST=<tailnet ip>`) or behind a TLS proxy; `BRIDGE_HOST=127.0.0.1`
+  closes the port entirely. The bridge prints a warning when it binds a non-loopback address.
+- **Never log or commit the token.** It lives in the vault on the app side and in the systemd unit's
+  `Environment=` on the host.
+
+## 🔑 Release signing
+
+Release APKs are signed with `~/.hermes/secrets/mercury-release.jks` (alias `mercury`, RSA-4096,
+`CN=Mercury Messenger`, valid to 2054), wired in through the gitignored `android/key.properties`:
+
+```properties
+storeFile=/home/hermes/.hermes/secrets/mercury-release.jks
+storePassword=…            # ~/.hermes/secrets/mercury-release.pw
+keyAlias=mercury
+keyPassword=…
+```
+
+Without that file the release build falls back to the debug key and warns — never publish that APK.
+CI restores the key from `MERCURY_KEYSTORE_B64` / `MERCURY_KEYSTORE_PASSWORD` and runs
+`apksigner verify --print-certs`, failing unless the DN is `CN=Mercury Messenger` and v1+v2+v3
+schemes verify. (Every previous release was signed with the public Android debug key, so anyone could
+build a trojaned in-place update.) Keep one keystore per app so updates install in place.
+
+## ✅ Tests
+
+```bash
+flutter analyze && flutter test          # 24 tests: repository, ApiFailure, reconnect, AppState, banner
+cd server && python -m pytest tests -q   # 37 tests: bridge auth surface, memory/cron/servers routes
+python3 tools/contract_check.py          # every route the app calls must exist on the bridge
+```
+
+The bridge suite covers the cases that were previously impossible to fail: the token guard on
+`/api/v1` and `/html`, the preview-type restriction, WebSocket authentication, memory/cron/server
+writes, and the Sparky credential-vs-unreachable split. `tools/contract_check.py` is the gate against
+phantom routes (the app used to call nine that never existed).
 
 ## 🚀 Running (the app)
 
