@@ -10,7 +10,17 @@ After=network.target hermes-gateway.service
 Type=simple
 WorkingDirectory=/home/hermes/repos/hermes-mobile/server
 Environment=HERMES_HOME=/home/hermes/.hermes
+# REQUIRED. bridge.py exits without it: an unauthenticated bridge serves
+# ~/.hermes (chat history, config) and runs shell commands as this user.
+# Prefer EnvironmentFile=%h/.hermes/secrets/bridge.env (chmod 600) so the token
+# is not duplicated into unit backups every time this file is edited.
 Environment=BRIDGE_TOKEN=REPLACE_WITH_TOKEN
+# Listen address. 0.0.0.0 keeps the phone able to reach the bridge over the LAN;
+# set a Tailscale/loopback address to close the port, or put TLS in front of it
+# (the token and every response are cleartext over plain HTTP).
+Environment=BRIDGE_HOST=0.0.0.0
+# Browser origins allowed to call the API. Unset = no CORS headers at all.
+# Environment=MER_CORS_ORIGINS=https://example.test
 ExecStart=/home/hermes/.hermes/hermes-agent/venv/bin/python3 /home/hermes/repos/hermes-mobile/server/bridge.py
 Restart=on-failure
 RestartSec=5

@@ -6,17 +6,22 @@ reading live data straight from `~/.hermes`:
   - sessions & messages   -> state.db (SQLite)
   - model / provider      -> config.yaml
   - memory                -> memories/USER.md + memories/MEMORY.md
-  - cron jobs             -> cron/jobs.json
+  - cron jobs             -> cron/jobs.json (writes go through the hermes CLI)
   - skills                -> skills/**/SKILL.md
   - logs                  -> logs/*.log
   - chat (streaming)      -> real `hermes chat --resume <id>` subprocess
 
-Run:  uvicorn bridge:app --host 0.0.0.0 --port 9130
+Security: BRIDGE_TOKEN is REQUIRED (the process exits without it) and guards
+every route — `/api/v1/*`, `/html/*` and both WebSockets. Listen address comes
+from BRIDGE_HOST (default 0.0.0.0; set it to a loopback/Tailscale address).
+
+Run:  BRIDGE_TOKEN=... uvicorn bridge:app --host 127.0.0.1 --port 9130
 """
 from __future__ import annotations
 
 import asyncio
 import datetime as dt
+import hmac
 import json
 import os
 import re
@@ -46,8 +51,38 @@ LOGS_DIR = HERMES / "logs"
 SKILLS_DIR = HERMES / "skills"
 PROFILES_DIR = HERMES / "profiles"
 
-# Optional bearer token. When set, every /api/v1/* call must send it.
-BRIDGE_TOKEN = os.environ.get("BRIDGE_TOKEN")
+# Bearer token. REQUIRED — fail closed.
+#
+# The bridge fronts this machine's ~/.hermes (chat history in state.db, config,
+# the whole preview/file root) and can run shell commands as `hermes`. Started
+# without a token it is a full compromise of the machine for anything on the
+# LAN, so we refuse to boot instead of quietly serving everything. Previously
+# the token was optional AND only guarded /api/v1, which left `/html/<path>`
+# serving `~/.hermes/config.yaml`, `.env` and the 144 MB `state.db` to any
+# host on the network with no credential at all.
+BRIDGE_TOKEN = (os.environ.get("BRIDGE_TOKEN") or "").strip()
+if not BRIDGE_TOKEN:
+    raise SystemExit(
+        "BRIDGE_TOKEN is required — refusing to start an unauthenticated bridge.\n"
+        "The bridge serves ~/.hermes (chat history, config, model keys) and can "
+        "run shell commands as the hermes user. Set BRIDGE_TOKEN (see "
+        "server/hermes-bridge.service and README > Security)."
+    )
+
+# Where to listen. The default stays 0.0.0.0 because the deployed unit sets no
+# BRIDGE_HOST and the phone reaches the bridge over the LAN — silently changing
+# the default here would take the app offline on the next service restart. To
+# close the port, set BRIDGE_HOST to a loopback/Tailscale address in the unit
+# (a deployment change, not a code change). Non-loopback binds log a warning.
+BRIDGE_HOST = (os.environ.get("BRIDGE_HOST") or "0.0.0.0").strip() or "0.0.0.0"
+
+# Browser origins allowed to call the API. Empty (the default) emits no CORS
+# headers at all: the Android client is not a browser and never needed the old
+# `allow_origins=["*"]`, which let any web page a browser opened talk to the
+# bridge. Set MER_CORS_ORIGINS=https://foo,https://bar if a web build needs it.
+CORS_ORIGINS = [
+    o.strip() for o in os.environ.get("MER_CORS_ORIGINS", "").split(",") if o.strip()
+]
 # Absolute path to the `hermes` CLI (systemd services don't inherit ~/.local/bin).
 HERMES_BIN = os.environ.get("HERMES_BIN", "/home/hermes/.local/bin/hermes")
 # Firebase service-account JSON for FCM push (server-side). Optional.
@@ -91,16 +126,35 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="Hermes Mobile bridge", version="1.0", lifespan=lifespan)
 app.add_middleware(
-    CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"]
+    CORSMiddleware, allow_origins=CORS_ORIGINS, allow_methods=["*"], allow_headers=["*"]
 )
+
+
+def _token_ok(supplied: str | None) -> bool:
+    """Constant-time bearer comparison (a plain `==` leaks the token by timing)."""
+    return bool(supplied) and hmac.compare_digest(str(supplied), BRIDGE_TOKEN)
+
+
+def _request_token(request) -> str:
+    """Bearer token from the `Authorization` header, else from `?token=`.
+
+    The query form exists because a WebView (HTML preview) and the Dart
+    `WebSocketChannel` cannot always attach a header; it is the same secret
+    either way. Never log the return value.
+    """
+    auth = request.headers.get("authorization", "") or ""
+    if auth.lower().startswith("bearer "):
+        return auth[7:].strip()
+    try:
+        return (request.query_params.get("token") or "").strip()
+    except Exception:  # noqa: BLE001 - no query_params on the object
+        return ""
 
 
 @app.middleware("http")
 async def auth_middleware(request: Request, call_next):
-    if BRIDGE_TOKEN and request.url.path.startswith("/api/v1"):
-        auth = request.headers.get("authorization", "")
-        if auth != f"Bearer {BRIDGE_TOKEN}":
-            return JSONResponse({"detail": "unauthorized"}, status_code=401)
+    if request.url.path.startswith("/api/v1") and not _token_ok(_request_token(request)):
+        return JSONResponse({"detail": "unauthorized"}, status_code=401)
     return await call_next(request)
 
 # ---------------------------------------------------------------------------
@@ -741,21 +795,30 @@ def get_file(path: str = ""):
 
 
 @app.get("/html/{path:path}")
-def html_preview(path: str):
+def html_preview(path: str, request: Request):
     """Serve an HTML/CSS/JS/image preview to the app's in-app WebView.
 
-    Deliberately OUTSIDE /api/v1 so it needs no auth header (a WebView can't
-    attach one), and the URL mirrors the real file path so relative asset
-    references (./style.css, images, scripts) resolve naturally. Only serves
-    preview-safe content types from the allowed roots.
+    Lives outside /api/v1 because a WebView cannot attach an Authorization
+    header — so it accepts the bearer either as a header or as `?token=`
+    (the app appends it; see `HermesRepository.previewUrl`), and rejects
+    everything else with 401.
+
+    Only preview-safe types are served. The previous version fell back to
+    `application/octet-stream` for any unknown suffix, which turned this route
+    into an unauthenticated downloader for `~/.hermes/config.yaml`, `.env` and
+    the 144 MB `state.db`. Anything not in `_PREVIEW_TYPES` is now a 404.
     """
+    if not _token_ok(_request_token(request)):
+        raise HTTPException(status_code=401, detail="unauthorized")
     # {path:path} strips the leading '/', so rebuild an absolute filesystem path.
     p = Path("/" + path.lstrip("/")).expanduser().resolve()
     if not any(_is_within(p, root) for root in _file_roots()):
         raise HTTPException(status_code=403, detail="path outside allowed roots")
     if not p.is_file():
         raise HTTPException(status_code=404, detail="not found")
-    ctype = _PREVIEW_TYPES.get(p.suffix.lower(), "application/octet-stream")
+    ctype = _PREVIEW_TYPES.get(p.suffix.lower())
+    if ctype is None:
+        raise HTTPException(status_code=404, detail="not a previewable file type")
     return FileResponse(p, media_type=ctype)
 
 
@@ -834,6 +897,13 @@ def delete_group(gid: str):
 
 @app.websocket("/ws/group/{gid}")
 async def ws_group(websocket: WebSocket, gid: str):
+    # Authenticate BEFORE accept(): the HTTP middleware does not run for the
+    # WebSocket scope, so without this check any host on the LAN could subscribe
+    # to group replies. A WebSocket cannot set headers from Dart's
+    # WebSocketChannel, so `?token=` is accepted too.
+    if not _token_ok(_request_token(websocket)):
+        await websocket.close(code=1008)  # policy violation
+        return
     await websocket.accept()
     q: asyncio.Queue = asyncio.Queue()
     _register_queue(gid, q)
@@ -875,6 +945,11 @@ def test_push(body: dict | None = None):
 
 @app.websocket("/ws/chat/{session_id}")
 async def ws_chat(websocket: WebSocket, session_id: str):
+    # See ws_group: the HTTP middleware never runs for a WebSocket, and this
+    # one streams the assistant's replies (i.e. the whole transcript).
+    if not _token_ok(_request_token(websocket)):
+        await websocket.close(code=1008)  # policy violation
+        return
     await websocket.accept()
     q: asyncio.Queue = asyncio.Queue()
     _register_queue(session_id, q)
@@ -960,6 +1035,132 @@ def run_cron(job_id: str):
     return {"ok": True}
 
 
+# --- cron writes ------------------------------------------------------------
+# The app's Cron screen creates/edits/deletes jobs, but the bridge only exposed
+# GET and `/{id}/run`, so every save was a 405 the UI swallowed. These go through
+# the real `hermes cron` CLI rather than editing cron/jobs.json directly — the
+# scheduler owns that file's schema (next_run, state, …) and a hand-written row
+# would break it.
+CRON_ID_RE = re.compile(r"\b([0-9a-f]{6,16})\b")
+
+
+def _hermes_cli(args: list[str], timeout: int = 60) -> subprocess.CompletedProcess:
+    """Run the `hermes` CLI and return the completed process (never raises on
+    a non-zero exit — callers map that to an HTTP error with the stderr text)."""
+    return subprocess.run([HERMES_BIN, *args], capture_output=True, text=True,
+                          timeout=timeout)
+
+
+def _cli_error(exc: subprocess.CompletedProcess, fallback: str) -> HTTPException:
+    detail = (exc.stderr or exc.stdout or "").strip()[-500:] or fallback
+    return HTTPException(status_code=502, detail=f"hermes cron failed: {detail}")
+
+
+def parse_cron_id(stdout: str, known_ids: set[str] | None = None) -> str | None:
+    """Pull the job id out of `hermes cron create` output.
+
+    Prefers an id we already know about (read from jobs.json) appearing in the
+    output; otherwise the first id-shaped token. Returns None when the output
+    gives us nothing to work with, so the caller can fall back to jobs.json
+    rather than inventing an id.
+    """
+    text = stdout or ""
+    for kid in (known_ids or set()):
+        if kid and kid in text:
+            return kid
+    m = CRON_ID_RE.search(text)
+    return m.group(1) if m else None
+
+
+def _cron_job_ids() -> set[str]:
+    try:
+        data = json.loads(CRON_JOBS.read_text())
+        return {str(j.get("id")) for j in data.get("jobs", []) if j.get("id")}
+    except Exception:
+        return set()
+
+
+@app.post("/api/v1/cron")
+def create_cron(body: dict):
+    schedule = (body.get("schedule") or "").strip()
+    prompt = (body.get("prompt") or "").strip()
+    name = (body.get("name") or "").strip()[:120]
+    deliver = (body.get("deliver") or "").strip()
+    if not schedule:
+        raise HTTPException(status_code=400, detail="schedule required (e.g. 'every 2h', '0 9 * * *')")
+    if not prompt and not body.get("script"):
+        raise HTTPException(status_code=400, detail="prompt required")
+    before = _cron_job_ids()
+    args = ["cron", "create", schedule]
+    if prompt:
+        args.append(prompt)
+    if name:
+        args += ["--name", name]
+    if deliver:
+        args += ["--deliver", deliver]
+    try:
+        proc = _hermes_cli(args)
+    except subprocess.TimeoutExpired:
+        raise HTTPException(status_code=504, detail="hermes cron create timed out")
+    if proc.returncode != 0:
+        raise _cli_error(proc, "create failed")
+    new_id = parse_cron_id(proc.stdout, known_ids=_cron_job_ids() - before)
+    for j in cron():
+        if new_id and j["id"] == new_id:
+            return j
+    if name:
+        for j in cron():
+            if j["name"] == name:
+                return j
+    raise HTTPException(status_code=502,
+                        detail="job was created but its id could not be read back")
+
+
+@app.post("/api/v1/cron/{job_id}")
+def update_cron(job_id: str, body: dict):
+    if job_id not in _cron_job_ids():
+        raise HTTPException(status_code=404, detail="cron job not found")
+    args = ["cron", "edit", job_id]
+    if (sched := (body.get("schedule") or "").strip()):
+        args += ["--schedule", sched]
+    if (name := (body.get("name") or "").strip()):
+        args += ["--name", name[:120]]
+    if (prompt := (body.get("prompt") or "").strip()):
+        args += ["--prompt", prompt]
+    if (deliver := (body.get("deliver") or "").strip()):
+        args += ["--deliver", deliver]
+    if len(args) == 3:
+        raise HTTPException(status_code=400, detail="nothing to update")
+    try:
+        proc = _hermes_cli(args)
+        if proc.returncode != 0:
+            raise _cli_error(proc, "edit failed")
+        if "enabled" in body:
+            verb = "resume" if body.get("enabled") else "pause"
+            proc2 = _hermes_cli(["cron", verb, job_id])
+            if proc2.returncode != 0:
+                raise _cli_error(proc2, f"{verb} failed")
+    except subprocess.TimeoutExpired:
+        raise HTTPException(status_code=504, detail="hermes cron edit timed out")
+    for j in cron():
+        if j["id"] == job_id:
+            return j
+    return {"ok": True}
+
+
+@app.delete("/api/v1/cron/{job_id}")
+def delete_cron(job_id: str):
+    if job_id not in _cron_job_ids():
+        raise HTTPException(status_code=404, detail="cron job not found")
+    try:
+        proc = _hermes_cli(["cron", "remove", job_id])
+    except subprocess.TimeoutExpired:
+        raise HTTPException(status_code=504, detail="hermes cron remove timed out")
+    if proc.returncode != 0:
+        raise _cli_error(proc, "remove failed")
+    return {"ok": True}
+
+
 @app.get("/api/v1/skills")
 def skills():
     out = []
@@ -989,6 +1190,24 @@ def skills():
     return sorted(out, key=lambda s: s["name"])
 
 
+@app.post("/api/v1/skills/{skill_id}/toggle")
+def toggle_skill(skill_id: str):
+    """Not supported — answer honestly instead of 405-ing into the void.
+
+    Hermes has no per-skill enable/disable flag (skills are directories under
+    ~/.hermes/skills and the loader globs them; profiles opt out wholesale via
+    `hermes skills opt-out`). The app's Skills screen used to POST here and the
+    UI swallowed the 405, so flipping a switch looked like it worked. Now the
+    client gets a real message it can show. Disabling one skill is done by
+    removing it: `hermes skills uninstall <name>`.
+    """
+    raise HTTPException(
+        status_code=501,
+        detail=("this bridge cannot toggle a single skill: Hermes has no per-skill "
+                "enable flag. Use `hermes skills uninstall <name>` to remove one."),
+    )
+
+
 @app.get("/api/v1/memory")
 def memory():
     out = []
@@ -1011,6 +1230,68 @@ def memory():
 @app.get("/api/v1/memory/search")
 def memory_search(q: str = ""):
     return [m for m in memory() if q.lower() in m["content"].lower()]
+
+
+# --- memory writes ----------------------------------------------------------
+# The app's Memory screen could add/delete entries, but the bridge only ever
+# implemented GET, so every save died on a 405 that the UI swallowed. These are
+# file-backed (memories/USER.md, memories/MEMORY.md), written atomically so a
+# crash mid-write cannot truncate live memory.
+def _memory_category(category: str) -> tuple[str, Path]:
+    cat = (category or "").strip().lower()
+    if cat in ("user", "user.md"):
+        return "user", MEM_DIR / "USER.md"
+    if cat in ("memory", "mem", "memory.md", ""):
+        return "memory", MEM_DIR / "MEMORY.md"
+    raise HTTPException(status_code=400, detail="category must be 'user' or 'memory'")
+
+
+def _memory_entries(category: str) -> list[str]:
+    _, path = _memory_category(category)
+    if not path.exists():
+        return []
+    return [e.strip() for e in re.split(r"\n\s*§\s*\n", path.read_text(errors="ignore")) if e.strip()]
+
+
+def _write_memory_entries(category: str, entries: list[str]) -> None:
+    _, path = _memory_category(category)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text("\n\n§\n\n".join(entries) + ("\n" if entries else ""))
+    os.replace(tmp, path)
+
+
+@app.post("/api/v1/memory")
+def add_memory(body: dict):
+    category, _ = _memory_category(body.get("category") or "")
+    content = (body.get("content") or "").strip()
+    if not content:
+        raise HTTPException(status_code=400, detail="content required")
+    if len(content) > 2000:
+        raise HTTPException(status_code=400, detail="content too long (2000 char max)")
+    entries = _memory_entries(category)
+    entries.append(content)
+    _write_memory_entries(category, entries)
+    return {
+        "id": f"{category}-{len(entries) - 1}",
+        "category": category,
+        "content": content,
+        "createdAt": dt.datetime.now().isoformat(),
+    }
+
+
+@app.delete("/api/v1/memory/{entry_id}")
+def delete_memory(entry_id: str):
+    m = re.fullmatch(r"(user|memory)-(\d+)", entry_id or "")
+    if not m:
+        raise HTTPException(status_code=400, detail="id must look like 'user-3' or 'memory-0'")
+    category, idx = m.group(1), int(m.group(2))
+    entries = _memory_entries(category)
+    if idx >= len(entries):
+        raise HTTPException(status_code=404, detail="memory entry not found")
+    entries.pop(idx)
+    _write_memory_entries(category, entries)
+    return {"ok": True}
 
 
 @app.get("/api/v1/tools")
@@ -1246,7 +1527,95 @@ def servers():
         "isDefault": True,
         "accent": _hash_color("hermes"),
         "bots": bots,
-    }]
+    }, *_load_servers()]
+
+
+# --- server profiles --------------------------------------------------------
+# The app's "Servers & agents" screen adds and removes servers; the bridge only
+# implemented GET, so Add/Delete were 405s that the UI swallowed (the row simply
+# reappeared). Extra profiles now persist in $HERMES/mercury_servers.json, and
+# the built-in bridge entry is synthetic — it cannot be deleted.
+SERVER_STORE = HERMES / "mercury_servers.json"
+BUILTIN_SERVER_ID = "srv-hermes"
+
+
+def _load_servers() -> list[dict]:
+    try:
+        data = json.loads(SERVER_STORE.read_text())
+        items = data.get("servers", [])
+        return [s for s in items if isinstance(s, dict) and s.get("id")]
+    except Exception:
+        return []
+
+
+def _save_servers(items: list[dict]) -> None:
+    SERVER_STORE.parent.mkdir(parents=True, exist_ok=True)
+    tmp = SERVER_STORE.with_name(SERVER_STORE.name + ".tmp")
+    tmp.write_text(json.dumps({"servers": items}, indent=2))
+    os.replace(tmp, SERVER_STORE)
+
+
+def _validate_server(body: dict) -> dict:
+    name = (body.get("name") or "").strip()[:80]
+    base = (body.get("baseUrl") or "").strip().rstrip("/")
+    if not name:
+        raise HTTPException(status_code=400, detail="name required")
+    if not base.lower().startswith(("http://", "https://")):
+        raise HTTPException(status_code=400, detail="baseUrl must start with http:// or https://")
+    bots = body.get("bots")
+    return {
+        "id": (body.get("id") or "").strip() or f"srv-{int(_now())}",
+        "name": name,
+        "baseUrl": base,
+        "isDefault": bool(body.get("isDefault", False)),
+        "accent": int(body.get("accent") or _hash_color(name)),
+        "bots": [b for b in bots if isinstance(b, dict)] if isinstance(bots, list) else [],
+    }
+
+
+@app.post("/api/v1/servers")
+def add_server(body: dict):
+    srv = _validate_server(body)
+    if srv["id"] == BUILTIN_SERVER_ID:
+        raise HTTPException(status_code=400, detail="srv-hermes is the built-in bridge entry")
+    items = [s for s in _load_servers() if s["id"] != srv["id"]]
+    items.insert(0, srv)
+    _save_servers(items)
+    return srv
+
+
+@app.patch("/api/v1/servers/{server_id}")
+def edit_server(server_id: str, body: dict):
+    if server_id == BUILTIN_SERVER_ID:
+        raise HTTPException(status_code=400, detail="the built-in bridge entry cannot be edited")
+    items = _load_servers()
+    idx = next((i for i, s in enumerate(items) if s["id"] == server_id), None)
+    if idx is None:
+        raise HTTPException(status_code=404, detail="server not found")
+    merged = {**items[idx], **body, "id": server_id}
+    items[idx] = _validate_server(merged)
+    _save_servers(items)
+    return items[idx]
+
+
+@app.post("/api/v1/servers/{server_id}")
+def save_server(server_id: str, body: dict):
+    """Update alias — the Dart client posts to /servers/{id} for edits."""
+    if any(s["id"] == server_id for s in _load_servers()):
+        return edit_server(server_id, body)
+    body = {**body, "id": server_id}
+    return add_server(body)
+
+
+@app.delete("/api/v1/servers/{server_id}")
+def delete_server(server_id: str):
+    if server_id == BUILTIN_SERVER_ID:
+        raise HTTPException(status_code=400, detail="the built-in bridge entry cannot be removed")
+    items = _load_servers()
+    if not any(s["id"] == server_id for s in items):
+        raise HTTPException(status_code=404, detail="server not found")
+    _save_servers([s for s in items if s["id"] != server_id])
+    return {"ok": True}
 
 
 @app.get("/api/v1/logs")
@@ -1562,6 +1931,19 @@ class SparkyUnreachableError(Exception):
     pass
 
 
+class SparkyAuthError(Exception):
+    """Sparky rejected our bearer token (401/403) — a credential problem.
+
+    Kept distinct from SparkyUnreachableError so a wrong token can never be
+    mistaken for a wrong URL or a dead host (the "guessed /api/v1 that caused
+    401s" incident).
+    """
+
+
+class SparkyPathError(Exception):
+    """Sparky answered, but the endpoint does not exist (404) — a path problem."""
+
+
 def _coach_now() -> dt.datetime:
     tz_name = (os.environ.get("MER_COACH_TZ") or MER_COACH_TZ or "").strip()
     if tz_name:
@@ -1643,20 +2025,24 @@ def _get_coach_budget(date_str: str | None = None) -> dict:
     today_str = now.strftime("%Y-%m-%d")
     target_date = date_str.strip() if date_str else today_str
 
-    # 1. Goals (primary /for-date, fallback /by-date)
+    # 1. Goals. One verified endpoint only (docs/coach-budget-endpoint.md) — the
+    # old `/api/goals/by-date/{date}` fallback was a guess, and because a 401 was
+    # reported as "unreachable" an invented path was indistinguishable from a bad
+    # credential. Errors are now split: 401/403 = credentials, 404 = wrong path,
+    # anything else = unreachable.
     goals_data = None
-    for ep in [f"/api/goals/for-date?date={target_date}", f"/api/goals/by-date/{target_date}"]:
-        try:
-            raw = _fetch_sparky_json(ep, base_url, token)
-            if raw is not None:
-                goals_data = raw.get("data", raw) if isinstance(raw, dict) else raw
-                break
-        except urllib.error.HTTPError as he:
-            if he.code in (401, 403):
-                raise SparkyUnreachableError("sparky unreachable")
-            continue
-        except Exception as e:
-            raise SparkyUnreachableError(f"sparky unreachable: {e}")
+    try:
+        raw = _fetch_sparky_json(f"/api/goals/for-date?date={target_date}", base_url, token)
+        if raw is not None:
+            goals_data = raw.get("data", raw) if isinstance(raw, dict) else raw
+    except urllib.error.HTTPError as he:
+        if he.code in (401, 403):
+            raise SparkyAuthError(f"sparky rejected the token (HTTP {he.code})") from he
+        if he.code == 404:
+            raise SparkyPathError("sparky has no /api/goals/for-date — check the path") from he
+        raise SparkyUnreachableError(f"sparky unreachable: HTTP {he.code}") from he
+    except Exception as e:
+        raise SparkyUnreachableError(f"sparky unreachable: {e}") from e
 
     # 2. Nutrition
     nutrition_data = None
@@ -1666,9 +2052,10 @@ def _get_coach_budget(date_str: str | None = None) -> dict:
             nutrition_data = raw.get("data", raw) if isinstance(raw, dict) else raw
     except urllib.error.HTTPError as he:
         if he.code in (401, 403):
-            raise SparkyUnreachableError("sparky unreachable")
+            raise SparkyAuthError(f"sparky rejected the token (HTTP {he.code})") from he
+        raise SparkyUnreachableError(f"sparky unreachable: HTTP {he.code}") from he
     except Exception as e:
-        raise SparkyUnreachableError(f"sparky unreachable: {e}")
+        raise SparkyUnreachableError(f"sparky unreachable: {e}") from e
 
     if goals_data is None and nutrition_data is None:
         raise SparkyUnreachableError("sparky unreachable")
@@ -1836,6 +2223,11 @@ def coach_budget(date: str | None = None):
         return _get_coach_budget(date)
     except SparkyConfigError:
         return JSONResponse(status_code=503, content={"error": "sparky not configured"})
+    except SparkyAuthError as e:
+        # A credential problem is NOT "unreachable" — say so, without echoing the token.
+        return JSONResponse(status_code=502, content={"error": f"sparky auth failed: {e}"})
+    except SparkyPathError as e:
+        return JSONResponse(status_code=502, content={"error": f"sparky path wrong: {e}"})
     except SparkyUnreachableError:
         return JSONResponse(status_code=503, content={"error": "sparky unreachable"})
     except Exception:
@@ -2116,11 +2508,6 @@ Schema: {{"ok": true,
 Reply with one short line when done."""
 
 
-@app.get("/api/v1/coach/sync-logs/health")
-def coach_sync_health():
-    return {"ok": True, "profile": _sync_profile(), "mcp": True}
-
-
 @app.post("/api/v1/coach/sync-logs")
 async def coach_sync_logs(body: dict | None = None):
     import uuid
@@ -2253,4 +2640,12 @@ def healthz():
 if __name__ == "__main__":
     import uvicorn
 
-    uvicorn.run(app, host="0.0.0.0", port=int(os.environ.get("PORT", "9130")))
+    if BRIDGE_HOST not in ("127.0.0.1", "::1", "localhost"):
+        print(
+            f"[bridge] SECURITY: listening on {BRIDGE_HOST} (not loopback) over "
+            "plain HTTP. The bearer token and every response cross the network in "
+            "cleartext — use a Tailscale interface + BRIDGE_HOST=<tailnet ip>, or "
+            "put a TLS proxy in front of this port.",
+            flush=True,
+        )
+    uvicorn.run(app, host=BRIDGE_HOST, port=int(os.environ.get("PORT", "9130")))
