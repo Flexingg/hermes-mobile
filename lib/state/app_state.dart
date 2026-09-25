@@ -70,6 +70,32 @@ class AppState extends ChangeNotifier {
   String? error;
   bool _disposed = false;
 
+  /// Bounded ring of recent failures, newest first — the in-app answer to
+  /// "nothing happened". Only paths, status codes and the server's own message
+  /// go in here: never a token, a URL carrying one, or a response body.
+  static const int maxErrorLog = 50;
+  final List<String> _errorLog = [];
+  List<String> get errorLog => List.unmodifiable(_errorLog);
+
+  /// Surface a failure instead of swallowing it. Sets [error] (the banner) and
+  /// appends to the bounded log.
+  void reportError(Object e, {String? context}) {
+    final msg = context == null ? e.toString() : '$context: $e';
+    error = msg;
+    _errorLog.insert(0, '${DateTime.now().toIso8601String()}  $msg');
+    if (_errorLog.length > maxErrorLog) {
+      _errorLog.removeRange(maxErrorLog, _errorLog.length);
+    }
+    notifyListeners();
+  }
+
+  void clearError() {
+    if (error == null && _errorLog.isEmpty) return;
+    error = null;
+    _errorLog.clear();
+    notifyListeners();
+  }
+
   /// True once a real server has been reached successfully.
   bool connected = false;
 
@@ -134,7 +160,11 @@ class AppState extends ChangeNotifier {
     if (PushService.token != null) {
       try {
         await repo.registerDevice(PushService.token!);
-      } catch (_) {}
+      } catch (e) {
+        // A missing/broken push registration must never block chat — but it
+        // must not vanish either.
+        reportError(e, context: 'push registration');
+      }
     }
     busy = false;
     notifyListeners();
@@ -146,7 +176,7 @@ class AppState extends ChangeNotifier {
     try {
       await job();
     } catch (e) {
-      error = e.toString();
+      reportError(e);
     }
   }
 
@@ -182,7 +212,7 @@ class AppState extends ChangeNotifier {
     try {
       servers = await repo.servers();
     } catch (e) {
-      error = e.toString();
+      reportError(e, context: 'load servers');
     }
     notifyListeners();
   }
@@ -191,7 +221,7 @@ class AppState extends ChangeNotifier {
     try {
       sessions = await repo.sessions();
     } catch (e) {
-      error = e.toString();
+      reportError(e, context: 'load sessions');
     }
     notifyListeners();
   }
@@ -217,8 +247,10 @@ class AppState extends ChangeNotifier {
           .where((m) => _isEphemeral(m.id) && !fresh.any((f) => f.id == m.id))
           .toList();
       _messages[sid] = [...fresh, ...ephemeral];
-    } catch (_) {
-      // Keep whatever we already had; never disconnect on a reload failure.
+    } catch (e) {
+      // Keep whatever we already had; never disconnect on a reload failure —
+      // but say so, so a dead bridge is not an empty thread with no message.
+      reportError(e, context: 'reload thread');
     }
     notifyListeners();
   }
@@ -298,7 +330,9 @@ class AppState extends ChangeNotifier {
     try {
       _groups = await repo.groups();
       notifyListeners();
-    } catch (_) {}
+    } catch (e) {
+      reportError(e, context: 'load groups');
+    }
   }
 
   Future<GroupChat> createGroup({
@@ -315,7 +349,9 @@ class AppState extends ChangeNotifier {
     try {
       _groupMessages[gid] = await repo.groupMessages(gid);
       notifyListeners();
-    } catch (_) {}
+    } catch (e) {
+      reportError(e, context: 'open group');
+    }
   }
 
   Future<void> sendGroupMessage(String gid, String text) async {
@@ -368,7 +404,9 @@ class AppState extends ChangeNotifier {
   Future<void> _reloadGroupThread(String gid) async {
     try {
       _groupMessages[gid] = await repo.groupMessages(gid);
-    } catch (_) {}
+    } catch (e) {
+      reportError(e, context: 'reload group');
+    }
     await loadGroups();
     notifyListeners();
   }
@@ -385,14 +423,18 @@ class AppState extends ChangeNotifier {
     try {
       _bots = await repo.bots();
       notifyListeners();
-    } catch (_) {}
+    } catch (e) {
+      reportError(e, context: 'load bots');
+    }
   }
 
   Future<void> loadBotPets() async {
     try {
       _botPets = await repo.botPets();
       notifyListeners();
-    } catch (_) {}
+    } catch (e) {
+      reportError(e, context: 'load pets');
+    }
   }
 
   Future<Bot> createBot({required String name, String? description}) async {
@@ -488,7 +530,9 @@ class AppState extends ChangeNotifier {
   Future<void> _reloadThread(String sid) async {
     try {
       _messages[sid] = await repo.messages(sid);
-    } catch (_) {}
+    } catch (e) {
+      reportError(e, context: 'reload thread');
+    }
     await refreshSessions();
     notifyListeners();
   }

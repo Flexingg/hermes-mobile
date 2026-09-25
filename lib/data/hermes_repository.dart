@@ -5,8 +5,8 @@ import 'dart:ui';
 import 'package:http/http.dart' as http;
 import 'package:http_parser/http_parser.dart';
 import 'package:path_provider/path_provider.dart';
-import 'package:web_socket_channel/web_socket_channel.dart';
 import 'app_repository.dart';
+import 'api_failure.dart';
 import 'models.dart';
 
 /// Real HTTP/WebSocket connector to a Hermes bridge server. The bridge fronts
@@ -33,37 +33,111 @@ class HermesRepository implements AppRepository {
         if (token != null) 'Authorization': 'Bearer $token',
       };
 
+  /// Turn a non-2xx response into an [ApiFailure] that keeps the server's own
+  /// message (`{"detail": "path outside allowed roots"}`, `unauthorized`, …).
+  ApiFailure _failure(String method, String path, http.Response res, {String? hint}) {
+    final detail = parseApiDetail(res.body) ?? hint;
+    return ApiFailure(method, path, res.statusCode, detail);
+  }
+
+  /// Everything that isn't an [ApiFailure] from a real HTTP response is a
+  /// transport problem: name it that way instead of leaking a raw
+  /// `SocketException`/`TimeoutException` string into the UI.
+  ApiFailure _offline(String method, String path, Object error) =>
+      ApiFailure(method, path, 0, 'could not reach $baseUrl: $error');
+
   Future<dynamic> _get(String path) async {
-    final res = await _client
-        .get(Uri.parse('$baseUrl$path'), headers: _headers)
-        .timeout(const Duration(seconds: 15));
-    if (res.statusCode >= 400) throw Exception('GET $path → ${res.statusCode}');
+    http.Response res;
+    try {
+      res = await _client
+          .get(Uri.parse('$baseUrl$path'), headers: _headers)
+          .timeout(const Duration(seconds: 15));
+    } catch (e) {
+      throw _offline('GET', path, e);
+    }
+    if (res.statusCode >= 400) throw _failure('GET', path, res);
     return jsonDecode(res.body);
   }
 
   Future<dynamic> _post(String path, [Map<String, dynamic>? body]) async {
-    final res = await _client.post(Uri.parse('$baseUrl$path'),
-        headers: _headers, body: jsonEncode(body ?? {}))
-        .timeout(const Duration(seconds: 15));
-    if (res.statusCode >= 400) throw Exception('POST $path → ${res.statusCode}');
+    http.Response res;
+    try {
+      res = await _client.post(Uri.parse('$baseUrl$path'),
+          headers: _headers, body: jsonEncode(body ?? {}))
+          .timeout(const Duration(seconds: 15));
+    } catch (e) {
+      throw _offline('POST', path, e);
+    }
+    if (res.statusCode >= 400) throw _failure('POST', path, res);
     return jsonDecode(res.body);
   }
 
   Future<dynamic> _delete(String path) async {
-    final res = await _client
-        .delete(Uri.parse('$baseUrl$path'), headers: _headers)
-        .timeout(const Duration(seconds: 15));
-    if (res.statusCode >= 400) throw Exception('DELETE $path → ${res.statusCode}');
+    http.Response res;
+    try {
+      res = await _client
+          .delete(Uri.parse('$baseUrl$path'), headers: _headers)
+          .timeout(const Duration(seconds: 15));
+    } catch (e) {
+      throw _offline('DELETE', path, e);
+    }
+    if (res.statusCode >= 400) throw _failure('DELETE', path, res);
     return res.body.isEmpty ? null : jsonDecode(res.body);
   }
 
   Future<dynamic> _patch(String path, [Map<String, dynamic>? body]) async {
-    final res = await _client.patch(Uri.parse('$baseUrl$path'),
-        headers: _headers, body: jsonEncode(body ?? {}))
-        .timeout(const Duration(seconds: 15));
-    if (res.statusCode >= 400) throw Exception('PATCH $path → ${res.statusCode}');
+    http.Response res;
+    try {
+      res = await _client.patch(Uri.parse('$baseUrl$path'),
+          headers: _headers, body: jsonEncode(body ?? {}))
+          .timeout(const Duration(seconds: 15));
+    } catch (e) {
+      throw _offline('PATCH', path, e);
+    }
+    if (res.statusCode >= 400) throw _failure('PATCH', path, res);
     return res.body.isEmpty ? null : jsonDecode(res.body);
   }
+
+  // ---- WebSockets -----------------------------------------------------
+  /// Backoff schedule for re-opening a dropped bridge stream:
+  /// 250 ms, 500 ms, 1 s, 2 s, 4 s, then 8 s (capped). Pure, so it is unit
+  /// tested without a socket.
+  static Duration reconnectDelay(int attempt) {
+    const cap = Duration(seconds: 8);
+    if (attempt <= 0) return const Duration(milliseconds: 250);
+    final ms = 250 * (1 << (attempt > 5 ? 5 : attempt));
+    final d = Duration(milliseconds: ms);
+    return d > cap ? cap : d;
+  }
+
+  /// Open a bridge WebSocket, retrying with [reconnectDelay] backoff.
+  ///
+  /// The bridge authenticates the WebSocket upgrade (an HTTP middleware never
+  /// runs for the WS scope), so the bearer must be sent on the handshake — which
+  /// `dart:io`'s WebSocket supports and `WebSocketChannel.connect` did not.
+  /// `pingInterval` keeps carrier NAT from silently dropping a long reply.
+  Future<WebSocket> openSocket(String path, {int attempts = 4}) async {
+    final wsUrl = baseUrl.replaceFirst('http', 'ws').replaceFirst('https', 'wss');
+    Object? last;
+    for (var attempt = 0; attempt < attempts; attempt++) {
+      if (attempt > 0) await Future.delayed(reconnectDelay(attempt));
+      try {
+        final socket = await WebSocket.connect(
+          '$wsUrl$path',
+          headers: token == null ? null : {'Authorization': 'Bearer $token'},
+        ).timeout(const Duration(seconds: 15));
+        socket.pingInterval = const Duration(seconds: 20);
+        return socket;
+      } catch (e) {
+        last = e;
+      }
+    }
+    throw ApiFailure('WS', path, 0,
+        'could not open the live stream after $attempts attempts: $last');
+  }
+
+  Stream<String> _textFrames(WebSocket socket) => socket
+      .map((raw) => raw is String ? raw : utf8.decode(raw as List<int>));
 
   // ---- Servers --------------------------------------------------------
   @override
@@ -125,7 +199,7 @@ class HermesRepository implements AppRepository {
             headers: _headers, body: jsonEncode({'name': name, 'text': text}))
         .timeout(const Duration(seconds: 185));
     if (res.statusCode >= 400) {
-      throw Exception('POST /api/v1/chat/start → ${res.statusCode}');
+      throw _failure('POST', '/api/v1/chat/start', res);
     }
     return _sessionFromJson(jsonDecode(res.body) as Map<String, dynamic>);
   }
@@ -154,7 +228,7 @@ class HermesRepository implements AppRepository {
             }))
         .timeout(Duration(seconds: (timeout ?? 300) + 30));
     if (res.statusCode >= 400) {
-      throw Exception('POST /terminal/run → ${res.statusCode}: ${res.body}');
+      throw _failure('POST', '/api/v1/terminal/run', res);
     }
     final d = jsonDecode(res.body) as Map<String, dynamic>;
     return TerminalResult(
@@ -199,6 +273,10 @@ class HermesRepository implements AppRepository {
   /// Web URL that serves an agent-produced file as an in-app preview (HTML/CSS/
   /// JS/images render interactively; relative assets resolve against the real
   /// file path on the bridge).
+  ///
+  /// The bridge's `/html/` route serves ~/.hermes, so it now requires the bearer
+  /// token — and a WebView cannot send an Authorization header, so it travels as
+  /// `?token=` instead. Never log or display this URL.
   @override
   String previewUrl(String filePath) {
     final segs = filePath
@@ -206,7 +284,9 @@ class HermesRepository implements AppRepository {
         .where((s) => s.isNotEmpty)
         .map((s) => Uri.encodeComponent(s))
         .join('/');
-    return '$baseUrl/html/$segs';
+    final t = token;
+    final query = (t == null || t.isEmpty) ? '' : '?token=${Uri.encodeQueryComponent(t)}';
+    return '$baseUrl/html/$segs$query';
   }
 
   Attachment _attachmentFromJson(Map<String, dynamic> m) {
@@ -229,11 +309,10 @@ class HermesRepository implements AppRepository {
     //    registered before we trigger hermes. Otherwise a fast reply's chunks
     //    and "done" are broadcast to no listener and are lost — the UI then
     //    never updates until the app is restarted.
-    final wsUrl = baseUrl
-        .replaceFirst('http', 'ws')
-        .replaceFirst('https', 'wss');
-    final channel = WebSocketChannel.connect(
-        Uri.parse('$wsUrl/ws/chat/$sessionId'));
+    //    openSocket retries with backoff and sends the bearer on the handshake
+    //    (the bridge authenticates the upgrade; HTTP middleware never runs for
+    //    the WebSocket scope).
+    final socket = await openSocket('/ws/chat/$sessionId');
 
     // 2) Persist the user message (this spawns hermes on the bridge).
     await _post('/api/v1/sessions/$sessionId/messages', {
@@ -271,8 +350,8 @@ class HermesRepository implements AppRepository {
       );
     }
 
-    await for (final raw in channel.stream) {
-      final data = jsonDecode(raw as String);
+    await for (final raw in _textFrames(socket)) {
+      final data = jsonDecode(raw) as Map<String, dynamic>;
       final event = data['event'] as String? ?? 'chunk';
       if (event == 'done') break;
       final type = (data['type'] as String?) ?? 'answer';
@@ -286,7 +365,7 @@ class HermesRepository implements AppRepository {
       accs[type] = (accs[type] ?? '') + delta;
       yield msg(type, accs[type]!, ChatMessageStatus.streaming);
     }
-    await channel.sink.close();
+    await socket.close();
 
     if (curType != null && (accs[curType] ?? '').trim().isNotEmpty) {
       yield msg(curType, accs[curType]!, ChatMessageStatus.sent);
@@ -308,7 +387,8 @@ class HermesRepository implements AppRepository {
     final streamed = await req.send().timeout(const Duration(seconds: 90));
     final res = await http.Response.fromStream(streamed);
     if (res.statusCode >= 400) {
-      throw Exception('POST /attachments → ${res.statusCode}');
+      throw ApiFailure('POST', '/api/v1/attachments', res.statusCode,
+          parseApiDetail(res.body));
     }
     final d = jsonDecode(res.body) as Map<String, dynamic>;
     return Attachment(
@@ -336,7 +416,8 @@ class HermesRepository implements AppRepository {
             .send(http.Request('GET', uri)..headers.addAll(_headers))
             .timeout(timeout);
         if (streamed.statusCode >= 400) {
-          throw Exception('GET /files → ${streamed.statusCode}');
+          throw ApiFailure('GET', '/api/v1/files', streamed.statusCode,
+              parseApiDetail(await streamed.stream.bytesToString()));
         }
         final dir = await getTemporaryDirectory();
         final name = serverPath.split('/').last.trim();
@@ -350,12 +431,18 @@ class HermesRepository implements AppRepository {
           await sink.close();
         }
         return f.path;
+      } on ApiFailure catch (e) {
+        lastError = e;
+        // 4xx is a decision, not a hiccup: retrying a 403/404 is pointless and
+        // it must not be reported as "no response" either.
+        if (!e.isOffline) rethrow;
+        // Retry once: large transfers over Tailscale/cellular can drop mid-body.
       } on Exception catch (e) {
         lastError = e;
         // Retry once: large transfers over Tailscale/cellular can drop mid-body.
       }
     }
-    throw Exception('Download failed: ${lastError ?? 'unknown error'}');
+    throw ApiFailure('GET', '/api/v1/files', 0, 'download failed: ${lastError ?? 'unknown error'}');
   }
 
   @override
@@ -433,14 +520,12 @@ class HermesRepository implements AppRepository {
   Stream<ChatMessage> sendGroupMessage(String gid, String text) async* {
     // Connect the WS first so the bridge's queue is registered before the
     // fan-out starts (same fast-reply race as sendMessage).
-    final wsUrl = baseUrl.replaceFirst('http', 'ws').replaceFirst('https', 'wss');
-    final channel =
-        WebSocketChannel.connect(Uri.parse('$wsUrl/ws/group/$gid'));
+    final socket = await openSocket('/ws/group/$gid');
     await _post('/api/v1/groups/$gid/messages', {'text': text});
     final acc = <String, String>{};
     try {
-      await for (final raw in channel.stream) {
-        final data = jsonDecode(raw as String);
+      await for (final raw in _textFrames(socket)) {
+        final data = jsonDecode(raw) as Map<String, dynamic>;
         final event = data['event'] as String? ?? 'chunk';
         final agent = data['agent'] as String?;
         if (event == 'chunk' && agent != null) {
@@ -463,7 +548,7 @@ class HermesRepository implements AppRepository {
         }
       }
     } finally {
-      await channel.sink.close();
+      await socket.close();
     }
   }
 

@@ -1,4 +1,7 @@
 import 'package:flutter/material.dart';
+import 'package:provider/provider.dart';
+import '../../state/app_state.dart';
+import '../../widgets/common.dart';
 import '../chat/chat_list_page.dart';
 import '../controller/controller_page.dart';
 import '../dashboard/dashboard_page.dart';
@@ -24,8 +27,21 @@ class _HomeShellState extends State<HomeShell> {
       DashboardPage(),
       SettingsPage(),
     ];
+    final state = context.watch<AppState>();
     return Scaffold(
-      body: IndexedStack(index: _index, children: pages),
+      body: Column(
+        children: [
+          // Failures used to disappear into `catch (_) {}`; a visible strip is
+          // the difference between "the bridge is down" and "nothing happened".
+          if (state.error != null)
+            ErrorBanner(
+              message: state.error!,
+              log: state.errorLog,
+              onDismiss: state.clearError,
+            ),
+          Expanded(child: IndexedStack(index: _index, children: pages)),
+        ],
+      ),
       bottomNavigationBar: NavigationBar(
         selectedIndex: _index,
         onDestinationSelected: (i) => setState(() => _index = i),

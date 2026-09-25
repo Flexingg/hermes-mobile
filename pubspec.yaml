@@ -36,7 +36,9 @@ dependencies:
   cupertino_icons: ^1.0.8
   provider: ^6.1.5+1
   http: ^1.6.0
-  web_socket_channel: ^3.0.3
+  # web_socket_channel was removed: the app now uses dart:io WebSocket directly,
+  # which can send the Authorization header on the handshake (the bridge
+  # authenticates the upgrade) and set a pingInterval.
   shared_preferences: ^2.5.5
   flutter_secure_storage: ^9.2.4
   dynamic_color: ^1.7.0
