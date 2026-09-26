@@ -4,11 +4,11 @@
     mercury_notify.py --kind ready --project lumen-launcher --task t_ab12 \
         --title "lumen-launcher #42 ready for testing" --body "Add fasting card" --url PR_URL [--apk PATH]
 
-Kinds: ready | needs_you | working | info. POSTs to the bridge's loopback-only
+Kinds: ready | needs_you | working | merged | info. POSTs to the bridge's loopback-only
 /internal/notify, authenticated with ~/.hermes/mercury/notify.key (created by
 install.sh; the bridge reads the same file). The bridge turns it into an FCM push
-and a live event for the app. `ready` and `needs_you` are sent once per task and
-PR head: a repeat is reported as skipped, not pushed twice.
+and a live event for the app. `ready`, `needs_you` and `merged` are sent once per
+task and PR head: a repeat is reported as skipped, not pushed twice.
 """
 from __future__ import annotations
 
@@ -22,7 +22,7 @@ from mercury_common import MERCURY_HOME, MercuryError, emit, main_guard, task_st
 
 BRIDGE = os.environ.get("MERCURY_BRIDGE_URL", "http://127.0.0.1:9130").rstrip("/")
 KEY_FILE = MERCURY_HOME / "notify.key"
-KINDS = ("ready", "needs_you", "working", "info")
+KINDS = ("ready", "needs_you", "working", "merged", "info")
 
 
 def send(payload: dict) -> dict:
@@ -47,7 +47,7 @@ def notify(kind: str, project: str, title: str, body: str = "", task: str | None
     if kind not in KINDS:
         raise MercuryError(f"kind must be one of {', '.join(KINDS)}")
     once_key = None
-    if task and kind in ("ready", "needs_you"):
+    if task and kind in ("ready", "needs_you", "merged"):
         state = task_state(task)
         once_key = f"{kind}:{state.get('prNumber')}:{state.get('headSha')}"
         if not force and once_key in (state.get("notified") or []):

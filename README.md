@@ -100,6 +100,19 @@ The logic lives in Hermes, not in the app or the bridge: skills and scripts in [
 The bridge only reads Hermes' state and relays; a test fails if it ever files an issue, creates a task,
 opens a PR or kills a process. Design and decisions: [`docs/PLAN-projects-orchestrator.md`](docs/PLAN-projects-orchestrator.md).
 
+**Tap a task** and you get its own page: issue, PR, CI, coder, branch, when it merged, the test build —
+and the three things you can do with it.
+
+| Action | What happens |
+|---|---|
+| **Ask <project>** | Opens the project agent's chat with the issue/PR already in the composer, so you type one sentence |
+| **Suggest edits** | One note, sent to Hermes as an `edit_task` intent. An open PR → the note goes back on the task and its worker updates the same branch; a merged one → Hermes hands it to the project agent as new work |
+| **File a follow-up issue** | The project agent scopes your note against the code, checks for duplicates, and files it queued like any other issue |
+
+**A merged PR closes its own task.** `mercury-ci` notices the merge, marks the task `merged`, sends one
+*"#42 merged"* push, and removes the worktree and both copies of the branch. A PR closed *without*
+merging ends the task too, but deletes nothing (nothing landed) and says so.
+
 ```bash
 hermes/install.sh           # scripts, skills, push guard, notify key, cron jobs (idempotent)
 hermes/install.sh --check   # what's installed
@@ -150,6 +163,40 @@ Every failure surfaces the bridge's own `{"detail": …}` message in the app's e
 (`ApiFailure`), so a 401 (bad token), a 404 (route does not exist) and a dead socket are
 distinguishable instead of all looking like "nothing happened".
 
+## 🌍 Reaching the bridge from outside your network
+
+Three ways, picked on the connect screen (**How do you reach it?**), because they are for different
+days: none of them is a fallback for another.
+
+| | Address | Needs | Notes |
+|---|---|---|---|
+| **Local network** | `http://192.168.x.x:9130` | same Wi-Fi | Fastest; the app can find the bridge by mDNS ("Search your network") |
+| **Tailscale** | `http://100.x.y.z:9130` | the VPN on the phone | Nothing is exposed publicly; the bridge still speaks plain HTTP inside the tailnet |
+| **Cloudflare tunnel** | `https://….trycloudflare.com` (or your own hostname) | nothing, or a domain | Works on any network, TLS terminated at the edge; ask Hermes to start it |
+
+```bash
+python3 ~/.hermes/mercury/bin/mercury_tunnel.py up      # start (prints the URL)
+python3 ~/.hermes/mercury/bin/mercury_tunnel.py status  # is it up, and where
+python3 ~/.hermes/mercury/bin/mercury_tunnel.py down    # stop exactly what it started
+```
+
+Or just tell Hermes *"start the tunnel"* — it runs the same script and quotes the URL back — and then
+tap **Use the tunnel my server has open** on the connect screen, which reads `GET /api/v1/tunnel` and
+fills the address in. The bridge never starts or stops the tunnel itself; it only reports what that
+script left behind (test-enforced).
+
+- `cloudflared` dials **out** to Cloudflare and forwards to `http://127.0.0.1:9130`, so no inbound port
+  is opened and the bridge can stay bound to loopback.
+- The tunnel runs as a **systemd `--user` unit** (`mercury-tunnel`), so it survives the chat turn or cron
+  tick that started it and `down` stops it by name. Without a user manager, a detached process with a
+  recorded pid is used instead.
+- A **quick tunnel** is free and needs no account, but its URL changes every start and Cloudflare
+  authenticates nobody on it — the bridge token is the only gate. For anything lasting, create a named
+  tunnel, point it at `127.0.0.1:9130` in `~/.cloudflared/config.yml`, and put a **Cloudflare Access**
+  policy in front of it: then `up --hostname bridge.example.com` gives a stable URL, and the app's
+  optional *Access client ID / secret* fields send the service token on every request (including the
+  WebSocket handshake). Both halves are stored in the Android keystore, like the API token.
+
 ## 🔒 Security
 
 The bridge fronts `~/.hermes` — chat history in `state.db`, `config.yaml`, the memory files — and can
@@ -165,8 +212,12 @@ run shell commands as the `hermes` user. Treat its token as the machine's passwo
 - **CORS is off by default.** Set `MER_CORS_ORIGINS` if a browser build needs it; the Android client
   never did.
 - **Cleartext LAN.** The token and every response cross the network unencrypted. Put the bridge on a
-  Tailscale interface (`BRIDGE_HOST=<tailnet ip>`) or behind a TLS proxy; `BRIDGE_HOST=127.0.0.1`
-  closes the port entirely. The bridge prints a warning when it binds a non-loopback address.
+  Tailscale interface (`BRIDGE_HOST=<tailnet ip>`), or reach it through a Cloudflare tunnel so TLS is
+  terminated at the edge (see above); `BRIDGE_HOST=127.0.0.1` closes the port entirely. The bridge
+  prints a warning when it binds a non-loopback address.
+- **A quick tunnel is public.** The URL is random but unauthenticated at the edge, so `BRIDGE_TOKEN` is
+  the only gate on it — use a named tunnel with a Cloudflare Access policy for anything beyond trying it
+  out, and `mercury_tunnel.py down` when you are done.
 - **Never log or commit the token.** It lives in the vault on the app side and in the systemd unit's
   `Environment=` on the host.
 
@@ -191,9 +242,9 @@ build a trojaned in-place update.) Keep one keystore per app so updates install 
 ## ✅ Tests
 
 ```bash
-flutter analyze && flutter test          # 34 tests: repository, ApiFailure, reconnect, AppState, banner, projects
-cd server && python -m pytest tests -q   # 94 tests: bridge auth, routes, API-server chat, per-profile chats, project views
-cd hermes && python -m pytest tests -q   # 46 tests: the Hermes-side scripts, run as Hermes runs them
+flutter analyze && flutter test          # 59 tests: repository, ApiFailure, reconnect, AppState, banner, projects, task actions, CLI noise
+cd server && python -m pytest tests -q   # 121 tests: bridge auth, routes, API-server chat, per-profile chats, project views, chat plumbing
+cd hermes && python -m pytest tests -q   # 60 tests: the Hermes-side scripts, run as Hermes runs them
 python3 tools/contract_check.py          # every route the app calls must exist on the bridge
 ```
 

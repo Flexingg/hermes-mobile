@@ -210,6 +210,11 @@ class _ReceivedBubble extends StatelessWidget {
                     ...message.attachments.map(
                         (a) => a.isHtml ? _HtmlPreviewCard(attachment: a) : _DownloadChip(attachment: a)),
                   ],
+                  if (message.sessionMeta.isNotEmpty &&
+                      message.type == ChatMessageType.answer) ...[
+                    const SizedBox(height: 6),
+                    _SessionMetaRow(meta: message.sessionMeta),
+                  ],
                   const SizedBox(height: 2),
                   Text(formatClock(message.timestamp),
                       style: TextStyle(
@@ -504,6 +509,86 @@ class _HtmlPreviewCard extends StatelessWidget {
               ),
             ),
             Icon(Icons.chevron_right, size: 18, color: scheme.onSurfaceVariant),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+/// The facts Hermes' CLI printed around a reply — session id, run duration,
+/// message count, the command that resumes it on the desktop. Collapsed to one
+/// dim line: it is plumbing, but it is plumbing you sometimes want.
+class _SessionMetaRow extends StatefulWidget {
+  final Map<String, String> meta;
+  const _SessionMetaRow({required this.meta});
+
+  @override
+  State<_SessionMetaRow> createState() => _SessionMetaRowState();
+}
+
+class _SessionMetaRowState extends State<_SessionMetaRow> {
+  bool _open = false;
+
+  /// "Assistant · 19s · 2 messages" — only the facts that are present.
+  String get _summary {
+    final m = widget.meta;
+    return <String>[
+      if (m['title']?.isNotEmpty == true) m['title']!,
+      if (m['duration']?.isNotEmpty == true) m['duration']!,
+      if (m['messages']?.isNotEmpty == true) '${m['messages']} messages',
+      if (m['model']?.isNotEmpty == true) m['model']!,
+    ].join(' · ');
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    final m = widget.meta;
+    final detail = <String>[
+      if (m['sessionId']?.isNotEmpty == true) 'session ${m['sessionId']}',
+      if (m['profile']?.isNotEmpty == true) 'profile ${m['profile']}',
+      if (m['resumeCommand']?.isNotEmpty == true) m['resumeCommand']!,
+      if (m['note']?.isNotEmpty == true) m['note']!,
+    ].join('\n');
+    return GestureDetector(
+      key: const Key('session-meta'),
+      onTap: () => setState(() => _open = !_open),
+      behavior: HitTestBehavior.opaque,
+      child: Container(
+        width: double.infinity,
+        constraints: const BoxConstraints(maxWidth: 320),
+        padding: const EdgeInsets.symmetric(vertical: 5, horizontal: 9),
+        decoration: BoxDecoration(
+          color: scheme.surfaceContainerHighest.withValues(alpha: 0.35),
+          borderRadius: BorderRadius.circular(8),
+        ),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Row(
+              children: [
+                Icon(Icons.terminal, size: 12, color: scheme.onSurfaceVariant),
+                const SizedBox(width: 5),
+                Expanded(
+                  child: Text(
+                    _summary.isEmpty ? 'session' : _summary,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(fontSize: 11, color: scheme.onSurfaceVariant),
+                  ),
+                ),
+                if (detail.isNotEmpty)
+                  Icon(_open ? Icons.expand_less : Icons.expand_more,
+                      size: 13, color: scheme.onSurfaceVariant),
+              ],
+            ),
+            if (_open && detail.isNotEmpty) ...[
+              const SizedBox(height: 4),
+              SelectableText(detail,
+                  style: TextStyle(fontSize: 11, height: 1.35, color: scheme.onSurfaceVariant)),
+            ],
           ],
         ),
       ),

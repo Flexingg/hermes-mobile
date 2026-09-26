@@ -12,6 +12,66 @@ enum ChatMessageRole { user, assistant, system, tool }
 /// separate the final answer from Hermes' thinking and tool/status noise.
 enum ChatMessageType { answer, thinking, technical }
 
+/// How a bridge is reached from the phone. It changes the guidance and the
+/// suggested URL on the connect screen — never the transport, which is always
+/// HTTP/WebSocket to whatever `baseUrl` was verified.
+enum ConnectionKind {
+  lan('Local network', 'http://192.168.1.146:9130',
+      'Same Wi-Fi as the server. Fastest, and nothing leaves your network.'),
+  tailscale('Tailscale', 'http://100.64.0.1:9130',
+      'Your tailnet address: works anywhere the VPN is on, no public exposure.'),
+  tunnel('Cloudflare tunnel', 'https://your-tunnel.trycloudflare.com',
+      'A tunnel the server started (Ask Hermes → "start the tunnel"). Works on any '
+      'network, and Cloudflare terminates TLS at the edge.');
+
+  const ConnectionKind(this.label, this.example, this.hint);
+  final String label;
+  final String example;
+  final String hint;
+
+  static ConnectionKind parse(String? s) => values.asNameMap()[s] ?? ConnectionKind.lan;
+
+  /// A URL typed for this kind must look like it: https for a tunnel.
+  String? validate(String url) {
+    if (url.isEmpty) return 'Enter the server URL.';
+    final uri = Uri.tryParse(url);
+    if (uri == null || !uri.hasScheme || uri.host.isEmpty) {
+      return 'That does not look like a URL (try $example).';
+    }
+    if (this == ConnectionKind.tunnel && uri.scheme != 'https') {
+      return 'A Cloudflare tunnel is always https.';
+    }
+    if (this != ConnectionKind.tunnel && uri.scheme != 'http' && uri.scheme != 'https') {
+      return 'Use http:// or https://.';
+    }
+    return null;
+  }
+}
+
+/// The Cloudflare tunnel the server has open, as the bridge reports it.
+class TunnelStatus {
+  final bool up;
+  final String? kind; // quick | named
+  final String? url;
+  final String? hostname;
+  final bool accessProtected;
+  const TunnelStatus({
+    required this.up,
+    this.kind,
+    this.url,
+    this.hostname,
+    this.accessProtected = false,
+  });
+
+  factory TunnelStatus.fromJson(Map<String, dynamic> j) => TunnelStatus(
+        up: j['up'] == true,
+        kind: j['kind'] as String?,
+        url: j['url'] as String?,
+        hostname: j['hostname'] as String?,
+        accessProtected: j['accessProtected'] == true,
+      );
+}
+
 class Attachment {
   final String name;
   final String url;
@@ -46,6 +106,10 @@ class ChatMessage {
   final String? toolName; // for role == tool
   final String? agent; // for group chats: which agent produced this message
   final ChatMessageType type; // for streamed assistant content
+  /// Facts Hermes' CLI printed around this reply (session id, title, duration,
+  /// message count, resume command). Shown collapsed under the bubble — the
+  /// banner text itself is never part of [text].
+  final Map<String, String> sessionMeta;
 
   const ChatMessage({
     required this.id,
@@ -58,6 +122,7 @@ class ChatMessage {
     this.toolName,
     this.agent,
     this.type = ChatMessageType.answer,
+    this.sessionMeta = const {},
   });
 
   bool get isUser => role == ChatMessageRole.user;
@@ -66,6 +131,7 @@ class ChatMessage {
   ChatMessage copyWith({
     String? text,
     ChatMessageStatus? status,
+    Map<String, String>? sessionMeta,
   }) {
     return ChatMessage(
       id: id,
@@ -78,6 +144,7 @@ class ChatMessage {
       toolName: toolName,
       agent: agent,
       type: type,
+      sessionMeta: sessionMeta ?? this.sessionMeta,
     );
   }
 }

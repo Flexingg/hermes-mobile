@@ -3,6 +3,7 @@ import 'package:flutter/foundation.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import '../security/vault.dart';
 import '../theme/app_theme.dart';
+import '../../data/models.dart';
 
 /// App-wide, persisted configuration (theme, server connection, accent).
 /// Backed by [SharedPreferences]; the server token lives in the secure
@@ -20,6 +21,7 @@ class AppConfig extends ChangeNotifier {
   static const _kServerName = 'cfg_server_name';
   static const _kServerBase = 'cfg_server_base';
   static const _kServerTokenRef = 'cfg_server_token_ref';
+  static const _kServerKind = 'cfg_server_kind';
 
   late ThemePreference _themePreference;
   late bool _dynamicColor;
@@ -34,6 +36,7 @@ class AppConfig extends ChangeNotifier {
   String? _serverName;
   String? _serverBaseUrl;
   String? _serverTokenRef;
+  ConnectionKind _serverKind = ConnectionKind.lan;
 
   bool get dynamicColor => _dynamicColor;
   ThemePreference get themePreference => _themePreference;
@@ -47,6 +50,11 @@ class AppConfig extends ChangeNotifier {
 
   String? get serverName => _serverName;
   String? get serverBaseUrl => _serverBaseUrl;
+
+  /// How the configured server is reached (a tunnel, the LAN, Tailscale). Kept
+  /// so the connect screen and Settings can explain the connection, and so a
+  /// tunnel URL can be recognised after the fact.
+  ConnectionKind get serverKind => _serverKind;
 
   /// True once a server has been configured (connection may still be pending).
   bool get hasServer => _serverBaseUrl != null && _serverBaseUrl!.isNotEmpty;
@@ -68,6 +76,7 @@ class AppConfig extends ChangeNotifier {
     _serverName = prefs.getString(_kServerName);
     _serverBaseUrl = prefs.getString(_kServerBase);
     _serverTokenRef = prefs.getString(_kServerTokenRef);
+    _serverKind = ConnectionKind.parse(prefs.getString(_kServerKind));
     final seed = prefs.getInt(_kSeed);
     _seedColor = seed == null ? null : Color(seed);
   }
@@ -76,22 +85,46 @@ class AppConfig extends ChangeNotifier {
   Future<String?> get serverToken =>
       _serverTokenRef == null ? Future.value(null) : VaultService.readToken(_serverTokenRef!);
 
-  /// Persist a server connection. The token is stored in the secure vault.
+  /// The Cloudflare Access service token for the configured server, if the edge
+  /// is protected. Both halves come from the vault; null when either is missing.
+  Future<({String id, String secret})?> get serverAccessToken async {
+    final ref = _serverTokenRef;
+    if (ref == null) return null;
+    final id = await VaultService.readSecret(ref, 'cfId');
+    final secret = await VaultService.readSecret(ref, 'cfSecret');
+    if (id == null || id.isEmpty || secret == null || secret.isEmpty) return null;
+    return (id: id, secret: secret);
+  }
+
+  /// Persist a server connection. The token and any Access service token go to
+  /// the secure vault, never to plaintext preferences.
   Future<void> setServer({
     required String name,
     required String baseUrl,
     required String token,
+    ConnectionKind kind = ConnectionKind.lan,
+    String? accessClientId,
+    String? accessClientSecret,
   }) async {
     _serverName = name;
     _serverBaseUrl = baseUrl;
     _serverTokenRef = baseUrl; // key the token by base URL
+    _serverKind = kind;
     notifyListeners();
     final p = await SharedPreferences.getInstance();
     await p.setString(_kServerName, name);
     await p.setString(_kServerBase, baseUrl);
     await p.setString(_kServerTokenRef, baseUrl);
+    await p.setString(_kServerKind, kind.name);
     if (token.isNotEmpty) {
       await VaultService.writeToken(baseUrl, token);
+    }
+    if ((accessClientId ?? '').isNotEmpty && (accessClientSecret ?? '').isNotEmpty) {
+      await VaultService.writeSecret(baseUrl, 'cfId', accessClientId!);
+      await VaultService.writeSecret(baseUrl, 'cfSecret', accessClientSecret!);
+    } else {
+      // Switching away from a protected tunnel must not leave the token behind.
+      await VaultService.deleteServerSecrets(baseUrl);
     }
   }
 
@@ -101,12 +134,17 @@ class AppConfig extends ChangeNotifier {
     _serverName = null;
     _serverBaseUrl = null;
     _serverTokenRef = null;
+    _serverKind = ConnectionKind.lan;
     notifyListeners();
     final p = await SharedPreferences.getInstance();
     await p.remove(_kServerName);
     await p.remove(_kServerBase);
     await p.remove(_kServerTokenRef);
-    if (ref != null) await VaultService.deleteToken(ref);
+    await p.remove(_kServerKind);
+    if (ref != null) {
+      await VaultService.deleteToken(ref);
+      await VaultService.deleteServerSecrets(ref);
+    }
   }
 
   Future<void> setThemePreference(ThemePreference value) async {

@@ -30,6 +30,10 @@ class ChatThreadPage extends StatefulWidget {
   final Project? project;
   final bool planMode;
 
+  /// Text to pre-fill the composer with (not sent): used when a chat is opened
+  /// from a task, so the message starts with the issue/PR in it.
+  final String? draftText;
+
   const ChatThreadPage({
     super.key,
     required this.sessionId,
@@ -39,6 +43,7 @@ class ChatThreadPage extends StatefulWidget {
     this.isGroup = false,
     this.project,
     this.planMode = false,
+    this.draftText,
   });
 
   @override
@@ -225,6 +230,7 @@ class _ChatThreadPageState extends State<ChatThreadPage> {
           if (widget.project != null) _modeBar(context),
           MessageComposer(
             enabled: !(widget.isNewChat && state.creatingChat),
+            initialText: widget.draftText,
             hint: widget.project == null
                 ? null
                 : (_plan ? 'Describe the change you want…' : 'Message ${widget.project!.name}'),

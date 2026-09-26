@@ -122,6 +122,9 @@ abstract class AppRepository {
   Future<IntentResult> intent(String kind,
       {String? project, String? sessionId, Map<String, dynamic>? payload});
   Future<List<ProjectEvent>> events({String? since});
+  /// The Cloudflare tunnel that reaches this bridge, if the server has one open
+  /// (read-only: starting it is Hermes' job, and the app only shows the URL).
+  Future<TunnelStatus> tunnelStatus();
 
   // ---- Command palette / webhooks -----------------------------------
   Future<List<CommandItem>> commandPalette();

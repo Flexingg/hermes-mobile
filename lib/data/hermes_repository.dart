@@ -5,6 +5,7 @@ import 'dart:ui';
 import 'package:http/http.dart' as http;
 import 'package:http_parser/http_parser.dart';
 import 'package:path_provider/path_provider.dart';
+import '../core/util/cli_noise.dart';
 import 'app_repository.dart';
 import 'api_failure.dart';
 import 'models.dart';
@@ -24,13 +25,34 @@ import 'project_models.dart';
 class HermesRepository implements AppRepository {
   final String baseUrl;
   final String? token;
+
+  /// Cloudflare Access service token, for a bridge reached through a named
+  /// tunnel whose Access policy is in front of it. Both parts must be present:
+  /// the edge rejects the request before the bridge ever sees the bearer.
+  final String? accessClientId;
+  final String? accessClientSecret;
   final http.Client _client;
 
-  HermesRepository({required this.baseUrl, this.token, http.Client? client})
-      : _client = client ?? http.Client();
+  HermesRepository({
+    required this.baseUrl,
+    this.token,
+    this.accessClientId,
+    this.accessClientSecret,
+    http.Client? client,
+  }) : _client = client ?? http.Client();
+
+  /// Extra headers a Cloudflare Access policy expects on every request,
+  /// including the WebSocket handshake.
+  Map<String, String> get accessHeaders => {
+        if (accessClientId != null && accessClientSecret != null) ...{
+          'CF-Access-Client-Id': accessClientId!,
+          'CF-Access-Client-Secret': accessClientSecret!,
+        },
+      };
 
   Map<String, String> get _headers => {
         'Content-Type': 'application/json',
+        ...accessHeaders,
         if (token != null) 'Authorization': 'Bearer $token',
       };
 
@@ -125,7 +147,10 @@ class HermesRepository implements AppRepository {
       try {
         final socket = await WebSocket.connect(
           '$wsUrl$path',
-          headers: token == null ? null : {'Authorization': 'Bearer $token'},
+          headers: {
+            ...accessHeaders,
+            if (token != null) 'Authorization': 'Bearer $token',
+          },
         ).timeout(const Duration(seconds: 15));
         socket.pingInterval = const Duration(seconds: 20);
         return socket;
@@ -332,11 +357,36 @@ class HermesRepository implements AppRepository {
 
     // 3) Stream the assistant reply over WebSocket. Hermes' CLI output is
     //    divided by the bridge into answer / thinking / technical chunks; we
-    //    render each phase as its own bubble (stable id per phase).
+    //    render each phase as its own bubble (stable id per phase). Hermes' own
+    //    session banner arrives as a `session_meta` event, never as text.
     final baseId = 'live-${DateTime.now().millisecondsSinceEpoch}';
     final accs = {'answer': '', 'thinking': '', 'technical': ''};
     String? curType;
     var completed = false;
+    // Facts from the bridge's session_meta event, or scraped from plumbing lines
+    // if an older bridge streamed them as text.
+    final meta = <String, String>{};
+    final scraped = <String>[];
+
+    /// An answer phase with Hermes' CLI chrome removed. Whole lines only: the
+    /// trailing partial line may still be mid-write.
+    String visible(String type, String raw) {
+      if (type != 'answer') return raw;
+      final lines = raw.split('\n');
+      final tail = lines.removeLast();
+      final kept = <String>[];
+      for (final l in lines) {
+        if (isPlumbingLine(l)) {
+          scraped.add(l);
+          continue;
+        }
+        kept.add(l);
+      }
+      kept.add(tail);
+      return kept.join('\n');
+    }
+
+    String asText(String type, String raw) => (type == 'answer' ? visible(type, raw) : raw);
 
     ChatMessage msg(String type, String text, ChatMessageStatus status) {
       final parsed = type == 'answer'
@@ -349,12 +399,9 @@ class HermesRepository implements AppRepository {
         text: parsed.text,
         timestamp: DateTime.now(),
         status: status,
-        type: type == 'thinking'
-            ? ChatMessageType.thinking
-            : type == 'technical'
-                ? ChatMessageType.technical
-                : ChatMessageType.answer,
+        type: _streamType(type),
         attachments: parsed.attachments,
+        sessionMeta: type == 'answer' ? _metaFor(meta, scraped) : const {},
       );
     }
 
@@ -365,6 +412,12 @@ class HermesRepository implements AppRepository {
         completed = true;
         break;
       }
+      if (event == 'session_meta') {
+        data.forEach((k, v) {
+          if (k != 'event' && v != null && '$v'.isNotEmpty) meta[k] = '$v';
+        });
+        continue;
+      }
       final type = (data['type'] as String?) ?? 'answer';
       final delta = data['delta'] as String? ?? '';
       if (type != curType) {
@@ -374,7 +427,7 @@ class HermesRepository implements AppRepository {
         curType = type;
       }
       accs[type] = (accs[type] ?? '') + delta;
-      yield msg(type, accs[type]!, ChatMessageStatus.streaming);
+      yield msg(type, asText(type, accs[type]!), ChatMessageStatus.streaming);
     }
     await socket.close();
 
@@ -387,8 +440,26 @@ class HermesRepository implements AppRepository {
     }
 
     if (curType != null && (accs[curType] ?? '').trim().isNotEmpty) {
-      yield msg(curType, accs[curType]!, ChatMessageStatus.sent);
+      yield msg(curType, asText(curType, accs[curType]!), ChatMessageStatus.sent);
     }
+  }
+
+  /// Unknown chunk types are technical, never the answer: an unrecognised type
+  /// must not be able to smuggle plumbing into a bubble.
+  ChatMessageType _streamType(String type) => switch (type) {
+        'thinking' => ChatMessageType.thinking,
+        'answer' => ChatMessageType.answer,
+        _ => ChatMessageType.technical,
+      };
+
+  /// The session facts to show under a reply: the bridge's event, plus anything
+  /// scraped from a banner that arrived as text instead.
+  Map<String, String> _metaFor(Map<String, String> fromEvent, List<String> scraped) {
+    final out = Map<String, String>.from(fromEvent);
+    if (out.isEmpty && scraped.isNotEmpty) {
+      out.addAll(parseSessionMeta(scraped.join('\n')));
+    }
+    return out;
   }
 
   @override
@@ -400,6 +471,7 @@ class HermesRepository implements AppRepository {
     final req = http.MultipartRequest(
         'POST', Uri.parse('$baseUrl/api/v1/attachments'));
     if (token != null) req.headers['Authorization'] = 'Bearer $token';
+    req.headers.addAll(accessHeaders);
     req.files.add(await http.MultipartFile.fromPath('file', localPath,
         filename: name,
         contentType: mimeType != null ? MediaType.parse(mimeType) : null));
@@ -794,6 +866,13 @@ class HermesRepository implements AppRepository {
           .map((j) => ProjectEvent.fromJson((j as Map).cast<String, dynamic>()))
           .toList();
 
+  /// The server's Cloudflare tunnel, as the bridge reports it (read-only).
+  @override
+  Future<TunnelStatus> tunnelStatus() async {
+    final d = await _get('/api/v1/tunnel') as Map<String, dynamic>;
+    return TunnelStatus.fromJson(d);
+  }
+
   // ---- Dashboard ------------------------------------------------------
   @override
   Future<ServerStatus> serverStatus() async {
@@ -930,19 +1009,33 @@ class HermesRepository implements AppRepository {
         avatarColor: _color(j['color']),
       );
 
-  ChatMessage _messageFromJson(Map<String, dynamic> j) => ChatMessage(
-        id: (j['id'] ?? '').toString(),
-        sessionId: (j['sessionId'] ?? '').toString(),
-        role: ChatMessageRole.values.asNameMap()[j['role']] ??
-            ChatMessageRole.user,
-        text: j['text']?.toString() ?? '',
-        timestamp: _dt(j['timestamp']),
-        toolName: j['toolName']?.toString(),
-        attachments: (j['media'] as List? ?? [])
-            .whereType<Map<String, dynamic>>()
-            .map((m) => _attachmentFromJson(m))
-            .toList(),
-      );
+  ChatMessage _messageFromJson(Map<String, dynamic> j) {
+    final role = ChatMessageRole.values.asNameMap()[j['role']] ?? ChatMessageRole.user;
+    final raw = j['text']?.toString() ?? '';
+    // Stored history written before the bridge scrubbed CLI chrome: clean it on
+    // the way in, and keep the facts it carried as the collapsed meta row.
+    final clean = role == ChatMessageRole.assistant ? stripPlumbing(raw) : raw;
+    final given = (j['sessionMeta'] as Map?)
+        ?.map((k, v) => MapEntry('$k', '$v'))
+        .cast<String, String>();
+    var meta = given ?? const <String, String>{};
+    if (meta.isEmpty && role == ChatMessageRole.assistant) {
+      meta = parseSessionMeta(raw);
+    }
+    return ChatMessage(
+      id: (j['id'] ?? '').toString(),
+      sessionId: (j['sessionId'] ?? '').toString(),
+      role: role,
+      text: clean,
+      timestamp: _dt(j['timestamp']),
+      toolName: j['toolName']?.toString(),
+      attachments: (j['media'] as List? ?? [])
+          .whereType<Map<String, dynamic>>()
+          .map((m) => _attachmentFromJson(m))
+          .toList(),
+      sessionMeta: meta,
+    );
+  }
 
   /// Tolerant date parse — never throws on missing/malformed timestamps
   /// (a single bad row must not break the whole list).

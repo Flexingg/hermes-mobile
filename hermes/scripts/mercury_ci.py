@@ -16,10 +16,11 @@ import argparse
 import json
 import shutil
 import tempfile
+import time
 from pathlib import Path
 
 from mercury_common import (MERCURY_HOME, MercuryError, all_task_states, get_project, gh, hermes,
-                            update_task_state)
+                            run, task_state, update_task_state)
 from mercury_notify import notify
 
 APKS = MERCURY_HOME / "apks"
@@ -72,6 +73,60 @@ def fetch_apk(project: dict, head_sha: str, pr: int) -> str | None:
     return None
 
 
+def cleanup(project: dict, task: str, branch: str | None) -> list[str]:
+    """The work is in: drop this task's worktree and both copies of its branch.
+
+    Best-effort and reported. A leftover worktree or branch is not worth failing
+    the run over, but it must not be silent either — each line names what went.
+    """
+    done = []
+    wt = task_state(task).get("worktree")
+    if wt and Path(wt).is_dir():
+        if run(["git", "-C", project["path"], "worktree", "remove", "--force", wt],
+               check=False, timeout=120).returncode == 0:
+            done.append(f"worktree {wt}")
+    run(["git", "-C", project["path"], "worktree", "prune"], check=False)
+    if branch:
+        if run(["git", "-C", project["path"], "branch", "-D", branch],
+               check=False, timeout=60).returncode == 0:
+            done.append(f"branch {branch}")
+        if gh("api", "-X", "DELETE", f"repos/{project['repo']}/git/refs/heads/{branch}",
+              check=False, timeout=60).returncode == 0:
+            done.append(f"remote branch {branch}")
+    return done
+
+
+def finish(project: dict, task: str, pr: int, view: dict, head: str, apply: bool) -> str:
+    """The PR is over: close the task out, tell the phone, clean up.
+
+    Merged -> the task is done, the worktree and branch go, the phone gets one
+    push. Closed without merging -> recorded and reported the same way, but the
+    branch is left alone: nothing landed, so nothing is safe to delete.
+    """
+    state = task_state(task)
+    merged = view.get("state") == "MERGED"
+    label = f"{project['id']} #{state.get('issue')} PR #{pr}"
+    if not apply:
+        return f"would close {label} ({view['state'].lower()})"
+    url = view.get("url")
+    title = view.get("title", "")
+    update_task_state(task, phase="merged" if merged else "closed", headSha=head,
+                      mergedAt=time.time() if merged else None)
+    note = f"PR #{pr} {'merged' if merged else 'closed without merging'}: {url or ''}".strip()
+    hermes("kanban", "--board", project["board"], "comment", task, note, check=False)
+    hermes("kanban", "--board", project["board"], "complete", task, "--result", note, check=False)
+    if merged:
+        gone = cleanup(project, task, state.get("branch"))
+        r = notify("merged", project["id"], f"{project['name']} #{state.get('issue')} merged",
+                   title, task=task, url=url)
+        return (f"closed {label} (merged)"
+                f"{' · cleaned ' + ', '.join(gone) if gone else ''}"
+                f"{' (already notified)' if r.get('skipped') else ''}")
+    notify("info", project["id"], f"{project['name']} #{state.get('issue')} closed without merging",
+           title, task=task, url=url)
+    return f"closed {label} (not merged — branch kept)"
+
+
 def follow(state: dict, apply: bool) -> str | None:
     project = get_project(state["project"])
     task, pr = state["task"], state["prNumber"]
@@ -79,9 +134,7 @@ def follow(state: dict, apply: bool) -> str | None:
                          "state,headRefOid,statusCheckRollup,url,title").stdout)
     head = view.get("headRefOid") or ""
     if view.get("state") in ("MERGED", "CLOSED"):
-        if apply:
-            update_task_state(task, phase=view["state"].lower(), headSha=head)
-        return f"{project['id']} PR #{pr} {view['state'].lower()}"
+        return finish(project, task, pr, view, head, apply)
     ci, failing = ci_summary(view.get("statusCheckRollup") or [])
     if ci == "pending" or (ci == state.get("ci") and head == state.get("headSha")):
         return None
