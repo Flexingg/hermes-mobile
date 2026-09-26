@@ -2,6 +2,7 @@ import 'package:firebase_core/firebase_core.dart';
 import 'package:firebase_messaging/firebase_messaging.dart';
 import 'package:flutter/material.dart';
 import '../../features/chat/chat_thread_page.dart';
+import '../../features/projects/project_page.dart';
 import '../navigation.dart';
 import 'notifications.dart';
 
@@ -69,6 +70,13 @@ class PushService {
     final type = data['type'];
     final sessionId = data['session_id'];
     final nav = appNavigatorKey.currentState;
+    // "Ready for testing" / "needs you" from Hermes: open the project's work.
+    final project = data['project'];
+    if (nav != null && type == 'project' && project is String && project.isNotEmpty) {
+      nav.push(MaterialPageRoute(
+          builder: (_) => ProjectPage(projectId: project, initialTab: ProjectPage.workTab)));
+      return;
+    }
     if (nav == null || type != 'chat' || sessionId == null) return;
     nav.push(
       MaterialPageRoute(

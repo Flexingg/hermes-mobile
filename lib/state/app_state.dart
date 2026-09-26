@@ -7,6 +7,7 @@ import '../core/notifications/push.dart';
 import '../data/app_repository.dart';
 import '../data/hermes_repository.dart';
 import '../data/models.dart';
+import '../data/project_models.dart';
 
 /// Central reactive store driving the UI. Pages watch this notifier and call
 /// its methods; it owns the repository instance and streaming subscriptions.
@@ -65,6 +66,33 @@ class AppState extends ChangeNotifier {
   List<CommandItem> commands = [];
   List<WebhookRoute> webhooks = [];
   List<ServerProfile> servers = [];
+
+  // ---- Projects (Hermes orchestrates; this mirrors what it recorded) ----
+  List<Project> projects = [];
+  final Map<String, Project> _projectDetail = {};
+  final Map<String, List<ChatSession>> _projectSessions = {};
+  final Map<String, List<MemoryEntry>> _projectMemory = {};
+  List<GithubRepo> githubRepos = [];
+  AgentSnapshot? agents;
+  String? orchestratorSessionId;
+  // Requests Hermes is still working on (keys like 'link:owner/repo'), so the
+  // UI can show progress on the right button instead of a global spinner.
+  final Set<String> _pendingIntents = {};
+  // Plan drafts that were filed: message id -> Hermes' reply ("Filed #42 …").
+  final Map<String, String> _filedDrafts = {};
+
+  Project? projectDetail(String id) => _projectDetail[id];
+  Project? projectById(String id) {
+    for (final p in projects) {
+      if (p.id == id) return p;
+    }
+    return _projectDetail[id];
+  }
+
+  List<ChatSession> projectSessionsFor(String id) => _projectSessions[id] ?? const [];
+  List<MemoryEntry> projectMemoryFor(String profile) => _projectMemory[profile] ?? const [];
+  bool intentPending(String key) => _pendingIntents.contains(key);
+  String? filedDraftReply(String messageId) => _filedDrafts[messageId];
 
   bool busy = false;
   String? error;
@@ -215,6 +243,13 @@ class AppState extends ChangeNotifier {
     _groupSub?.cancel();
     _bots = [];
     _botPets = const [];
+    projects = [];
+    _projectDetail.clear();
+    _projectSessions.clear();
+    _projectMemory.clear();
+    githubRepos = [];
+    agents = null;
+    orchestratorSessionId = null;
     notifyListeners();
   }
 
@@ -474,7 +509,12 @@ class AppState extends ChangeNotifier {
     await refreshSessions();
   }
 
-  Future<void> sendMessage(String text, {List<Attachment> attachments = const []}) async {
+  /// [mode]/[project]/[profile] are set in a project chat ('plan' = Plan mode).
+  Future<void> sendMessage(String text,
+      {List<Attachment> attachments = const [],
+      String? mode,
+      String? project,
+      String? profile}) async {
     final sid = activeSessionId;
     if (sid == null || sending) return;
     sending = true;
@@ -502,7 +542,10 @@ class AppState extends ChangeNotifier {
         _reloadThread(sid);
       }
     });
-    _sub = repo.sendMessage(sid, text, attachments: attachments).listen((m) {
+    _sub = repo
+        .sendMessage(sid, text,
+            attachments: attachments, mode: mode, project: project, profile: profile)
+        .listen((m) {
       final list = _messages.putIfAbsent(sid, () => []);
       // Replace a streaming placeholder with the same id, else append.
       final idx = list.indexWhere((x) => x.id == m.id);
@@ -577,6 +620,7 @@ class AppState extends ChangeNotifier {
       _safe(loadGroups),
       _safe(loadBots),
       _safe(loadBotPets),
+      _safe(loadProjects),
     ]);
     busy = false;
     notifyListeners();
@@ -666,6 +710,153 @@ class AppState extends ChangeNotifier {
 
   Future<void> triggerWebhookById(String id) async {
     await repo.triggerWebhook(id);
+  }
+
+  // ---- Projects --------------------------------------------------------
+  Future<void> loadProjects() async {
+    try {
+      projects = await repo.projects();
+    } catch (e) {
+      reportError(e, context: 'load projects');
+    }
+    notifyListeners();
+  }
+
+  Future<void> loadProject(String id) async {
+    try {
+      final p = await repo.project(id);
+      _projectDetail[id] = p;
+      final i = projects.indexWhere((x) => x.id == id);
+      if (i >= 0) projects[i] = p;
+    } catch (e) {
+      reportError(e, context: 'load project');
+    }
+    notifyListeners();
+  }
+
+  Future<void> loadProjectSessions(String id) async {
+    try {
+      _projectSessions[id] = await repo.projectSessions(id);
+    } catch (e) {
+      reportError(e, context: 'load project chats');
+    }
+    notifyListeners();
+  }
+
+  Future<void> loadGithubRepos() async {
+    try {
+      githubRepos = await repo.githubRepos();
+    } catch (e) {
+      reportError(e, context: 'load GitHub repos');
+    }
+    notifyListeners();
+  }
+
+  Future<void> loadAgents() async {
+    try {
+      agents = await repo.agents();
+    } catch (e) {
+      reportError(e, context: 'load agents');
+    }
+    notifyListeners();
+  }
+
+  /// The orchestrator's chat, created by the bridge on first use.
+  Future<String?> openOrchestrator() async {
+    try {
+      orchestratorSessionId = await repo.orchestratorSession();
+      notifyListeners();
+      return orchestratorSessionId;
+    } catch (e) {
+      reportError(e, context: 'open Hermes');
+      return null;
+    }
+  }
+
+  /// A new chat with a project's agent (stored in that agent's own history).
+  Future<String?> createProjectChat(Project p, String title) async {
+    try {
+      final s = await repo.createSession(title, p.profile);
+      await loadProjectSessions(p.id);
+      return s.id;
+    } catch (e) {
+      reportError(e, context: 'new project chat');
+      return null;
+    }
+  }
+
+  /// Ask Hermes to act, tracking [key] as pending while it works. Returns its
+  /// reply, or null if the request failed (the failure is reported).
+  Future<String?> _intent(String key, String kind,
+      {String? project, String? sessionId, Map<String, dynamic>? payload}) async {
+    if (_pendingIntents.contains(key)) return null;
+    _pendingIntents.add(key);
+    notifyListeners();
+    try {
+      final r = await repo.intent(kind, project: project, sessionId: sessionId, payload: payload);
+      return r.reply;
+    } catch (e) {
+      reportError(e, context: 'ask Hermes ($kind)');
+      return null;
+    } finally {
+      _pendingIntents.remove(key);
+      notifyListeners();
+      unawaited(loadProjects());
+      if (project != null) unawaited(loadProject(project));
+    }
+  }
+
+  Future<String?> linkRepo(String repoName, {String coder = 'claude'}) =>
+      _intent('link:$repoName', 'link_repo', payload: {'repo': repoName, 'coder': coder});
+
+  Future<String?> setProject(String id, {String? coder, String? gates}) =>
+      _intent('set:$id', 'set_project', project: id,
+          payload: {'coder': ?coder, 'gates': ?gates});
+
+  Future<String?> unlinkProject(String id) async {
+    final r = await _intent('unlink:$id', 'unlink', project: id);
+    if (r != null) _projectDetail.remove(id);
+    return r;
+  }
+
+  Future<String?> retryTask(String project, String task) =>
+      _intent('task:$task', 'retry_task', project: project, payload: {'task': task});
+
+  Future<String?> cancelTask(String project, String task) =>
+      _intent('task:$task', 'cancel_task', project: project, payload: {'task': task});
+
+  Future<String?> pauseAll() => _intent('pause', 'pause');
+  Future<String?> resumeAll() => _intent('resume', 'resume');
+
+  /// "Create issue" on a Plan draft: the project agent that drafted it files it.
+  Future<String?> fileIssue(Project p, String sessionId, String messageId, IssueDraft draft) async {
+    final reply = await _intent('file:$messageId', 'file_issue',
+        project: p.id, sessionId: sessionId, payload: {'draft': draft.toJson()});
+    if (reply != null) {
+      _filedDrafts[messageId] = reply;
+      notifyListeners();
+      unawaited(refreshThread(sessionId));
+    }
+    return reply;
+  }
+
+  Future<void> loadProjectMemory(String profile) async {
+    try {
+      _projectMemory[profile] = await repo.memoryEntries(profile: profile);
+    } catch (e) {
+      reportError(e, context: 'load project memory');
+    }
+    notifyListeners();
+  }
+
+  Future<void> addProjectMemory(String profile, String content) async {
+    await repo.addMemory('memory', content, profile: profile);
+    await loadProjectMemory(profile);
+  }
+
+  Future<void> deleteProjectMemory(String profile, String id) async {
+    await repo.deleteMemory(id, profile: profile);
+    await loadProjectMemory(profile);
   }
 
   Color avatarColorFor(String sessionId) {

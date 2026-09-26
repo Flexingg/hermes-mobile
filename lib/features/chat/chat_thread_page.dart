@@ -5,8 +5,10 @@ import 'package:provider/provider.dart';
 import 'package:share_plus/share_plus.dart';
 import '../../core/pets.dart';
 import '../../data/models.dart';
+import '../../data/project_models.dart';
 import '../../state/app_state.dart';
 import '../../widgets/common.dart';
+import '../projects/issue_draft_card.dart';
 import 'composer.dart';
 import 'message_bubble.dart';
 
@@ -23,6 +25,11 @@ class ChatThreadPage extends StatefulWidget {
   /// True for a multi-agent group chat (shows per-agent avatars).
   final bool isGroup;
 
+  /// Set for a chat with a project's agent: enables the Chat | Plan switch, and
+  /// Plan replies that end in an issue draft render as a "Create issue" card.
+  final Project? project;
+  final bool planMode;
+
   const ChatThreadPage({
     super.key,
     required this.sessionId,
@@ -30,6 +37,8 @@ class ChatThreadPage extends StatefulWidget {
     this.name,
     this.pendingText,
     this.isGroup = false,
+    this.project,
+    this.planMode = false,
   });
 
   @override
@@ -39,6 +48,7 @@ class ChatThreadPage extends StatefulWidget {
 class _ChatThreadPageState extends State<ChatThreadPage> {
   final _scroll = ScrollController();
   Timer? _poll;
+  late bool _plan = widget.planMode;
 
   String _effectiveId(AppState state) => widget.isNewChat
       ? (state.newChatTargetId ?? widget.sessionId)
@@ -135,7 +145,7 @@ class _ChatThreadPageState extends State<ChatThreadPage> {
                     session?.title ??
                         (widget.isNewChat
                             ? (widget.name ?? 'New chat')
-                            : 'Chat'),
+                            : (widget.name ?? 'Chat')),
                     style: const TextStyle(
                         fontSize: 17, fontWeight: FontWeight.w600)),
                 Text(_subtitle(state, session),
@@ -175,16 +185,35 @@ class _ChatThreadPageState extends State<ChatThreadPage> {
                           m.status != ChatMessageStatus.streaming) {
                         return const SizedBox.shrink();
                       }
+                      final draft = widget.project != null &&
+                              m.isAssistant &&
+                              m.status != ChatMessageStatus.streaming
+                          ? IssueDraft.tryParse(m.text)
+                          : null;
+                      final shown = draft == null ? m : m.copyWith(text: IssueDraft.strip(m.text));
                       final bubble = (m.isAssistant && m.id.startsWith('u-') == false)
                           ? MessageBubble(
-                              message: m,
+                              message: shown,
                               avatarColor:
-                                  session?.avatarColor ?? scheme.primary,
+                                  session?.avatarColor ?? widget.project?.color ?? scheme.primary,
                               avatarImagePath: petAssetForAgent(agentName),
                               showAvatar: widget.isGroup,
                             )
-                          : MessageBubble(message: m);
-                      return _InteractiveBubble(message: m, child: bubble);
+                          : MessageBubble(message: shown);
+                      final item = _InteractiveBubble(message: m, child: bubble);
+                      if (draft == null) return item;
+                      return Column(
+                        crossAxisAlignment: CrossAxisAlignment.stretch,
+                        children: [
+                          if (shown.text.trim().isNotEmpty) item,
+                          IssueDraftCard(
+                            project: widget.project!,
+                            sessionId: _effectiveId(state),
+                            messageId: m.id,
+                            draft: draft,
+                          ),
+                        ],
+                      );
                     },
                   ),
                 ),
@@ -193,9 +222,52 @@ class _ChatThreadPageState extends State<ChatThreadPage> {
             _startingBar(context, state)
           else if (state.sending)
             _sendingBar(context, state),
-          MessageComposer(enabled: !(widget.isNewChat && state.creatingChat)),
+          if (widget.project != null) _modeBar(context),
+          MessageComposer(
+            enabled: !(widget.isNewChat && state.creatingChat),
+            hint: widget.project == null
+                ? null
+                : (_plan ? 'Describe the change you want…' : 'Message ${widget.project!.name}'),
+            onSend: widget.project == null
+                ? null
+                : (text) => state.sendMessage(text,
+                    mode: _plan ? 'plan' : 'chat',
+                    project: widget.project!.id,
+                    profile: widget.project!.profile),
+          ),
         ],
       ),
+    );
+  }
+
+  /// Chat | Plan switch for project chats. Plan is read-only: the agent only
+  /// looks at the code and shapes an issue; nothing changes until it's filed.
+  Widget _modeBar(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    return Container(
+      color: _plan ? scheme.tertiaryContainer.withValues(alpha: 0.6) : scheme.surfaceContainerLow,
+      padding: const EdgeInsets.fromLTRB(12, 6, 12, 6),
+      child: Row(children: [
+        SegmentedButton<bool>(
+          key: const Key('mode-switch'),
+          showSelectedIcon: false,
+          style: const ButtonStyle(visualDensity: VisualDensity.compact),
+          segments: const [
+            ButtonSegment(value: false, label: Text('Chat'), icon: Icon(Icons.chat_bubble_outline, size: 16)),
+            ButtonSegment(value: true, label: Text('Plan'), icon: Icon(Icons.lightbulb_outline, size: 16)),
+          ],
+          selected: {_plan},
+          onSelectionChanged: (s) => setState(() => _plan = s.first),
+        ),
+        const SizedBox(width: 10),
+        Expanded(
+          child: Text(
+            _plan ? 'Shape an issue together. Read-only until you tap Create issue.' : 'Ask about the code',
+            maxLines: 2,
+            style: TextStyle(fontSize: 11, color: scheme.onSurfaceVariant),
+          ),
+        ),
+      ]),
     );
   }
 
@@ -247,6 +319,8 @@ class _ChatThreadPageState extends State<ChatThreadPage> {
         return 'Hermes is typing…';
       }
     }
+    final p = widget.project;
+    if (p != null) return _plan ? 'Plan mode · ${p.repo}' : '${p.repo} agent';
     return 'Hermes Agent · always available';
   }
 
@@ -259,7 +333,10 @@ class _ChatThreadPageState extends State<ChatThreadPage> {
           Icon(Icons.chat_bubble_outline,
               size: 72, color: scheme.outlineVariant),
           const SizedBox(height: 12),
-          Text('Say hi to Hermes',
+          Text(
+              widget.project == null
+                  ? 'Say hi to Hermes'
+                  : (_plan ? 'What should ${widget.project!.name} do next?' : 'Ask the ${widget.project!.name} agent'),
               style: Theme.of(context).textTheme.titleMedium),
         ],
       ),

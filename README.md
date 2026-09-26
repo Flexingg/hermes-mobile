@@ -67,11 +67,13 @@ lib/
 │   └── util/format.dart       # relative time / clock formatting
 ├── data/
 │   ├── models.dart            # ChatMessage, ChatSession, ServerProfile, CronJob, …
+│   ├── project_models.dart    # Project, ProjectTask, IssueDraft, …
 │   ├── app_repository.dart    # the one interface the UI talks to
 │   └── hermes_repository.dart # real HTTP + WebSocket connector (only backend)
 ├── state/app_state.dart       # ChangeNotifier store + connection + streaming
 ├── features/
 │   ├── shell/                 # bottom-nav scaffold
+│   ├── projects/              # projects list, link sheet, project tabs, issue card, work
 │   ├── chat/                  # list, thread, bubbles, composer, search, new-chat
 │   ├── controller/            # command palette, memory, skills, cron, tools, webhooks
 │   ├── dashboard/             # status cards, model health, logs
@@ -82,6 +84,26 @@ lib/
 The app is **interface-driven** and **real-data only**: every screen talks to `AppRepository`, whose
 sole implementation is `HermesRepository`. On first launch the app shows the connect screen and will
 not display any data until it has verified a live connection to a Hermes bridge server.
+
+## 📁 Projects (Hermes orchestrates)
+
+Link a GitHub repo in the **Projects** tab and it becomes a project with its own Hermes agent
+(`dev-<repo>` profile), memory and kanban board. In a project chat, switch to **Plan**: you and the
+agent shape one issue (read-only), and it ends in an editable **Issue card**. **Create issue** files it;
+Hermes queues it, a kanban worker has the project's coder (**Claude Code** or **Antigravity**; Hermes
+codes itself only as a fallback) implement it in its own worktree, runs the repo's gates, and opens a PR
+that closes the issue. When CI is green you get a push, *"… ready for testing"*, with the PR and, for
+Android repos, an **Install test build** button. An issue labelled `mercury` on GitHub is picked up too.
+
+The logic lives in Hermes, not in the app or the bridge: skills and scripts in [`hermes/`](hermes/)
+(installed into `~/.hermes` by `hermes/install.sh`), Hermes' kanban, and three `--no-agent` cron jobs.
+The bridge only reads Hermes' state and relays; a test fails if it ever files an issue, creates a task,
+opens a PR or kills a process. Design and decisions: [`docs/PLAN-projects-orchestrator.md`](docs/PLAN-projects-orchestrator.md).
+
+```bash
+hermes/install.sh           # scripts, skills, push guard, notify key, cron jobs (idempotent)
+hermes/install.sh --check   # what's installed
+```
 
 ## 🔌 The Hermes bridge
 
@@ -169,8 +191,9 @@ build a trojaned in-place update.) Keep one keystore per app so updates install 
 ## ✅ Tests
 
 ```bash
-flutter analyze && flutter test          # 24 tests: repository, ApiFailure, reconnect, AppState, banner
-cd server && python -m pytest tests -q   # 70 tests: bridge auth surface, memory/cron/servers routes, API-server chat transport, per-profile chats
+flutter analyze && flutter test          # 34 tests: repository, ApiFailure, reconnect, AppState, banner, projects
+cd server && python -m pytest tests -q   # 94 tests: bridge auth, routes, API-server chat, per-profile chats, project views
+cd hermes && python -m pytest tests -q   # 46 tests: the Hermes-side scripts, run as Hermes runs them
 python3 tools/contract_check.py          # every route the app calls must exist on the bridge
 ```
 

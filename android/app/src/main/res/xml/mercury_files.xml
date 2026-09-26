@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Files Mercury may hand to another app: only its own downloads (cache dir),
+     e.g. a PR's test APK for the package installer. -->
+<paths>
+    <cache-path name="downloads" path="." />
+</paths>

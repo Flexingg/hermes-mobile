@@ -5,10 +5,12 @@ import '../../widgets/common.dart';
 import '../chat/chat_list_page.dart';
 import '../controller/controller_page.dart';
 import '../dashboard/dashboard_page.dart';
+import '../projects/projects_page.dart';
 import '../settings/settings_page.dart';
 
-/// Root scaffold. A Material 3 [NavigationBar] hosts the four sections.
-/// Chats is the Google-Messages-style primary surface.
+/// Root scaffold. A Material 3 [NavigationBar] hosts the five sections.
+/// Projects comes first: linked repos, their agents, and the work Hermes is
+/// running for them. Chats keeps the Google-Messages-style conversations.
 class HomeShell extends StatefulWidget {
   const HomeShell({super.key});
 
@@ -19,9 +21,13 @@ class HomeShell extends StatefulWidget {
 class _HomeShellState extends State<HomeShell> {
   int _index = 0;
 
+  /// Work waiting on the user: PRs ready to test plus tasks that need them.
+  int _attention(AppState state) => state.projects.fold(0, (n, p) => n + p.ready + p.needsYou);
+
   @override
   Widget build(BuildContext context) {
     final pages = const [
+      ProjectsPage(),
       ChatListPage(),
       ControllerPage(),
       DashboardPage(),
@@ -46,20 +52,27 @@ class _HomeShellState extends State<HomeShell> {
         selectedIndex: _index,
         onDestinationSelected: (i) => setState(() => _index = i),
         labelBehavior: NavigationDestinationLabelBehavior.alwaysShow,
-        destinations: const [
+        destinations: [
           NavigationDestination(
+              icon: Badge(
+                  isLabelVisible: _attention(state) > 0,
+                  label: Text('${_attention(state)}'),
+                  child: const Icon(Icons.folder_special_outlined)),
+              selectedIcon: const Icon(Icons.folder_special),
+              label: 'Projects'),
+          const NavigationDestination(
               icon: Icon(Icons.forum_outlined),
               selectedIcon: Icon(Icons.forum),
               label: 'Chats'),
-          NavigationDestination(
+          const NavigationDestination(
               icon: Icon(Icons.play_circle_outline),
               selectedIcon: Icon(Icons.play_circle),
               label: 'Control'),
-          NavigationDestination(
+          const NavigationDestination(
               icon: Icon(Icons.dashboard_outlined),
               selectedIcon: Icon(Icons.dashboard),
               label: 'Status'),
-          NavigationDestination(
+          const NavigationDestination(
               icon: Icon(Icons.settings_outlined),
               selectedIcon: Icon(Icons.settings),
               label: 'Settings'),

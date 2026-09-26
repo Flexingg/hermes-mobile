@@ -12,7 +12,10 @@ class MessageComposer extends StatefulWidget {
 
   /// Optional override for where text is sent (used by group chats).
   final void Function(String text)? onSend;
-  const MessageComposer({super.key, this.enabled = true, this.onSend});
+
+  /// Placeholder text (e.g. Plan mode asks for the change you want).
+  final String? hint;
+  const MessageComposer({super.key, this.enabled = true, this.onSend, this.hint});
 
   @override
   State<MessageComposer> createState() => _MessageComposerState();
@@ -225,7 +228,7 @@ class _MessageComposerState extends State<MessageComposer> {
                           _send();
                         },
                         decoration: InputDecoration(
-                          hintText: widget.enabled ? 'Message' : 'Starting…',
+                          hintText: widget.enabled ? (widget.hint ?? 'Message') : 'Starting…',
                           border: InputBorder.none,
                         ),
                       ),

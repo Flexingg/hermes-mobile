@@ -2,6 +2,8 @@ import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import '../../core/util/format.dart';
 import '../../data/models.dart';
+import '../../data/project_models.dart';
+import '../projects/project_widgets.dart';
 import '../../state/app_state.dart';
 
 /// Dashboard: live server status cards, model health, and log viewer.
@@ -22,6 +24,7 @@ class _DashboardPageState extends State<DashboardPage> {
       state.loadStatus();
       state.loadModels();
       state.loadLogs();
+      state.loadAgents();
     });
   }
 
@@ -61,6 +64,8 @@ class _DashboardPageState extends State<DashboardPage> {
               const SizedBox(width: 12),
               Expanded(child: _Gauge(scheme: scheme, label: 'Disk', value: status.disk, icon: Icons.storage)),
             ]),
+            const SizedBox(height: 20),
+            _AgentsCard(snapshot: state.agents),
             const SizedBox(height: 20),
             Text('Model providers',
                 style: Theme.of(context).textTheme.titleMedium),
@@ -215,6 +220,79 @@ class _Gauge extends StatelessWidget {
             ),
           ],
         ),
+      ),
+    );
+  }
+}
+
+
+/// Hermes' agent processes and free memory, plus the kill switch. Hermes caps
+/// coding runs itself and stops the newest one if RAM runs low; "Pause all"
+/// asks it to stop dispatching work and taking new turns.
+class _AgentsCard extends StatelessWidget {
+  final AgentSnapshot? snapshot;
+  const _AgentsCard({required this.snapshot});
+
+  static String _kind(String k) => switch (k) {
+        'gateway' => 'Hermes',
+        'worker' => 'Worker',
+        'coder' => 'Coder',
+        'code_task' => 'Coding run',
+        'bridge' => 'Bridge',
+        'interactive' => 'Interactive',
+        _ => k,
+      };
+
+  Future<void> _ask(BuildContext context, Future<String?> Function() job, String title) async {
+    final reply = await job();
+    if (reply != null && context.mounted) showHermesReply(context, title, reply);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final state = context.watch<AppState>();
+    final scheme = Theme.of(context).colorScheme;
+    final snap = snapshot;
+    final busy = state.intentPending('pause') || state.intentPending('resume');
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(16, 12, 16, 8),
+        child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          Row(children: [
+            Text('Agents', style: Theme.of(context).textTheme.titleMedium),
+            const Spacer(),
+            if (snap != null)
+              Text('${(snap.memAvailableMb / 1024).toStringAsFixed(1)} GB free',
+                  style: TextStyle(color: snap.memAvailableMb < 1536 ? scheme.error : scheme.onSurfaceVariant)),
+          ]),
+          const SizedBox(height: 6),
+          if (snap == null)
+            Text('Not available', style: TextStyle(color: scheme.outline))
+          else
+            ...snap.processes.where((p) => p.kind != 'interactive').map((p) => Padding(
+                  padding: const EdgeInsets.symmetric(vertical: 2),
+                  child: Row(children: [
+                    SizedBox(width: 92, child: Text(_kind(p.kind), style: const TextStyle(fontWeight: FontWeight.w600))),
+                    Expanded(
+                        child: Text(p.profile ?? '', overflow: TextOverflow.ellipsis,
+                            style: TextStyle(color: scheme.onSurfaceVariant))),
+                    Text('${p.rssMb} MB', style: TextStyle(color: scheme.onSurfaceVariant)),
+                  ]),
+                )),
+          const SizedBox(height: 4),
+          Row(mainAxisAlignment: MainAxisAlignment.end, children: [
+            TextButton.icon(
+              onPressed: busy ? null : () => _ask(context, state.resumeAll, 'Resume'),
+              icon: const Icon(Icons.play_arrow_rounded),
+              label: const Text('Resume'),
+            ),
+            FilledButton.tonalIcon(
+              onPressed: busy ? null : () => _ask(context, state.pauseAll, 'Pause all'),
+              icon: const Icon(Icons.pause_rounded),
+              label: const Text('Pause all'),
+            ),
+          ]),
+        ]),
       ),
     );
   }

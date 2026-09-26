@@ -8,6 +8,7 @@ import 'package:path_provider/path_provider.dart';
 import 'app_repository.dart';
 import 'api_failure.dart';
 import 'models.dart';
+import 'project_models.dart';
 
 /// Real HTTP/WebSocket connector to a Hermes bridge server. The bridge fronts
 /// the Hermes gateway and exposes the REST + WS contract documented in the
@@ -304,7 +305,10 @@ class HermesRepository implements AppRepository {
 
   @override
   Stream<ChatMessage> sendMessage(String sessionId, String text,
-      {List<Attachment> attachments = const []}) async* {
+      {List<Attachment> attachments = const [],
+      String? mode,
+      String? project,
+      String? profile}) async* {
     // 1) Connect the WebSocket FIRST so the bridge's per-session queue is
     //    registered before we trigger hermes. Otherwise a fast reply's chunks
     //    and "done" are broadcast to no listener and are lost — the UI then
@@ -321,6 +325,9 @@ class HermesRepository implements AppRepository {
           .where((a) => a.path != null)
           .map((a) => {'path': a.path, 'name': a.name, 'kind': a.kind})
           .toList(),
+      'mode': ?mode,
+      'project': ?project,
+      'profile': ?profile,
     });
 
     // 3) Stream the assistant reply over WebSocket. Hermes' CLI output is
@@ -696,24 +703,25 @@ class HermesRepository implements AppRepository {
   Future<void> toggleSkill(String id) async => _post('/api/v1/skills/$id/toggle');
 
   @override
-  Future<List<MemoryEntry>> memoryEntries({String? category}) async {
-    final path = category == null
-        ? '/api/v1/memory'
-        : '/api/v1/memory?category=$category';
+  Future<List<MemoryEntry>> memoryEntries({String? category, String? profile}) async {
+    final query = {'category': ?category, 'profile': ?profile};
+    final path = Uri(path: '/api/v1/memory', queryParameters: query.isEmpty ? null : query).toString();
     final data =
         (await _get(path) as List).cast<Map<String, dynamic>>();
     return data.map(_memoryFromJson).toList();
   }
 
   @override
-  Future<MemoryEntry> addMemory(String category, String content) async {
-    final data =
-        await _post('/api/v1/memory', {'category': category, 'content': content});
+  Future<MemoryEntry> addMemory(String category, String content, {String? profile}) async {
+    final data = await _post('/api/v1/memory',
+        {'category': category, 'content': content, 'profile': ?profile});
     return _memoryFromJson(data);
   }
 
   @override
-  Future<void> deleteMemory(String id) async => _delete('/api/v1/memory/$id');
+  Future<void> deleteMemory(String id, {String? profile}) async => _delete(
+      Uri(path: '/api/v1/memory/$id', queryParameters: profile == null ? null : {'profile': profile})
+          .toString());
 
   @override
   Future<List<MemoryEntry>> searchMemory(String query) async {
@@ -721,6 +729,70 @@ class HermesRepository implements AppRepository {
         .cast<Map<String, dynamic>>();
     return data.map(_memoryFromJson).toList();
   }
+
+  // ---- Projects ---------------------------------------------------------
+  @override
+  Future<List<Project>> projects() async => (await _get('/api/v1/projects') as List)
+      .map((j) => Project.fromJson((j as Map).cast<String, dynamic>()))
+      .toList();
+
+  @override
+  Future<Project> project(String id) async => Project.fromJson(
+      (await _get('/api/v1/projects/${Uri.encodeComponent(id)}') as Map).cast<String, dynamic>());
+
+  @override
+  Future<List<ChatSession>> projectSessions(String id) async =>
+      (await _get('/api/v1/projects/${Uri.encodeComponent(id)}/sessions') as List)
+          .cast<Map<String, dynamic>>()
+          .map(_sessionFromJson)
+          .toList();
+
+  @override
+  Future<List<GithubRepo>> githubRepos() async => (await _get('/api/v1/github/repos') as List)
+      .map((j) => GithubRepo.fromJson((j as Map).cast<String, dynamic>()))
+      .toList();
+
+  @override
+  Future<AgentSnapshot> agents() async =>
+      AgentSnapshot.fromJson((await _get('/api/v1/agents') as Map).cast<String, dynamic>());
+
+  @override
+  Future<String> orchestratorSession() async =>
+      ((await _get('/api/v1/orchestrator') as Map)['sessionId'] ?? '').toString();
+
+  /// Hermes runs a whole agent turn to answer an intent (linking a repo clones
+  /// it; filing an issue calls GitHub), so this waits far longer than [_post].
+  @override
+  Future<IntentResult> intent(String kind,
+      {String? project, String? sessionId, Map<String, dynamic>? payload}) async {
+    const path = '/api/v1/hermes/intent';
+    http.Response res;
+    try {
+      res = await _client
+          .post(Uri.parse('$baseUrl$path'),
+              headers: _headers,
+              body: jsonEncode({
+                'kind': kind,
+                'project': ?project,
+                'sessionId': ?sessionId,
+                'payload': payload ?? const <String, dynamic>{},
+              }))
+          .timeout(const Duration(seconds: 330));
+    } catch (e) {
+      throw _offline('POST', path, e);
+    }
+    if (res.statusCode >= 400) throw _failure('POST', path, res);
+    final d = (jsonDecode(res.body) as Map).cast<String, dynamic>();
+    return IntentResult(
+        sessionId: (d['sessionId'] ?? '').toString(), reply: (d['reply'] ?? '').toString());
+  }
+
+  @override
+  Future<List<ProjectEvent>> events({String? since}) async =>
+      (await _get(Uri(path: '/api/v1/events', queryParameters: since == null ? null : {'since': since})
+              .toString()) as List)
+          .map((j) => ProjectEvent.fromJson((j as Map).cast<String, dynamic>()))
+          .toList();
 
   // ---- Dashboard ------------------------------------------------------
   @override

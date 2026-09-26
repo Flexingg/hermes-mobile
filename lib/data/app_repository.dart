@@ -1,4 +1,5 @@
 import 'models.dart';
+import 'project_models.dart';
 
 /// The single source of truth interface the whole app talks to.
 ///
@@ -23,8 +24,13 @@ abstract class AppRepository {
     required String text,
   });
   /// Sends a message and returns a stream of the assistant reply as it streams.
+  /// In a project chat, [mode] 'plan' makes it a read-only Plan-mode turn that
+  /// ends in an issue draft; [project]/[profile] say whose chat it is.
   Stream<ChatMessage> sendMessage(String sessionId, String text,
-      {List<Attachment> attachments = const []});
+      {List<Attachment> attachments = const [],
+      String? mode,
+      String? project,
+      String? profile});
   /// Uploads an image/file to the bridge so the agent can use it.
   Future<Attachment> uploadAttachment({
     required String localPath,
@@ -84,10 +90,10 @@ abstract class AppRepository {
   Future<List<Skill>> skills();
   Future<void> toggleSkill(String id);
 
-  // ---- Memory --------------------------------------------------------
-  Future<List<MemoryEntry>> memoryEntries({String? category});
-  Future<MemoryEntry> addMemory(String category, String content);
-  Future<void> deleteMemory(String id);
+  // ---- Memory (a project's agent has its own: pass its [profile]) -------
+  Future<List<MemoryEntry>> memoryEntries({String? category, String? profile});
+  Future<MemoryEntry> addMemory(String category, String content, {String? profile});
+  Future<void> deleteMemory(String id, {String? profile});
   Future<List<MemoryEntry>> searchMemory(String query);
 
   // ---- Dashboard -----------------------------------------------------
@@ -98,6 +104,24 @@ abstract class AppRepository {
   // ---- Tools / activity ---------------------------------------------
   Future<List<ToolActivity>> toolActivities({String? sessionId});
   Future<List<String>> toolCatalog();
+
+  // ---- Projects --------------------------------------------------------
+  // Hermes orchestrates projects. These read what it recorded and relay the
+  // user's requests to it; none of them act on GitHub or the boards directly.
+  Future<List<Project>> projects();
+  /// One project, with its tasks.
+  Future<Project> project(String id);
+  /// The project agent's own chats (Chat and Plan).
+  Future<List<ChatSession>> projectSessions(String id);
+  Future<List<GithubRepo>> githubRepos();
+  Future<AgentSnapshot> agents();
+  /// The orchestrator's chat (the pinned "Hermes" conversation).
+  Future<String> orchestratorSession();
+  /// Ask Hermes to do something (link a repo, file an issue, retry a task…).
+  /// Hermes answers in its chat; the reply comes back here too.
+  Future<IntentResult> intent(String kind,
+      {String? project, String? sessionId, Map<String, dynamic>? payload});
+  Future<List<ProjectEvent>> events({String? since});
 
   // ---- Command palette / webhooks -----------------------------------
   Future<List<CommandItem>> commandPalette();
