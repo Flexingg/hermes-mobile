@@ -1,6 +1,6 @@
 # Plan — Projects, per-repo agents, and the Hermes orchestrator
 
-Status: **v2; Phase 0, §13 calls, Phase 1 (§14) and the switch-over (§15) done** (2026-09-26). Decisions are in §10, Phase 0 findings in §12.
+Status: **v2; Phases 0–6 built (§14–§16); Phase 7 (release) pending** (2026-09-26). Decisions are in §10, Phase 0 findings in §12.
 
 > **v2 change:** v1 made the bridge a second orchestrator (it filed issues, polled GitHub,
 > followed CI and governed RAM). That was wrong. **Hermes is the only brain. Mercury is its
@@ -314,6 +314,27 @@ in the worktree (OK), and `main` on the remote is unchanged (`cdecb2a`).
   forces the platform on and ignores `enabled: false` (`gateway/config.py:2234`, unlike Mattermost). It is inert:
   with no `watch_*` filters every event is dropped (`adapter.py:310`), so it triggers no agent turns.
 - Cron: the gateway now ticks cron for all 20 profiles. No secondary profile had an active recurring job.
+
+## 16. Phases 2–6 (2026-09-26, branch `feat/projects`)
+
+Built and installed. The live run on `mercury-sandbox`, driven through the bridge as the app does it,
+went: `link` (Hermes, 11 s) → `set gates` (Hermes ran them to confirm) → Plan chat (35 s, read-only,
+checked for duplicates) → **Create issue** (#3 filed and queued) → worker (`prepare` → Claude Code →
+gates → `publish`) → PR #4 → `mercury-ci` → **ready push**. What the run found and fixed: projects are
+per profile in Hermes (scripts now always act as the default profile); gate detection; the `#N` title
+prefix; a moved project's primary folder; `hermes cron create` exits 0 when it refuses a job.
+
+Differences from §5–§7, all deliberate:
+- Intake, CI follow-up and the RAM floor are `--no-agent` cron jobs: deterministic, no model call
+  every two minutes. The orchestrator model handles conversation: linking, plans, your requests.
+- Plan mode is read-only **by instruction** (a per-turn system message plus the skill): the API server
+  has no per-request toolset override.
+- Test builds: for repos whose CI doesn't build PRs (lumen), the worker's own gate build is kept as
+  the PR head's APK.
+- Concurrency is Hermes' own `kanban.max_in_progress: 2`.
+
+Known limits: Home Assistant under `homie` ignores `enabled: false` (Hermes bug, inert). The app's
+push for "ready" uses the existing FCM path, so it needs the phone registered as before.
 
 ## 13a. Original questions (for the record)
 
