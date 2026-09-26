@@ -45,6 +45,8 @@ class FakeApi:
         self.stream = GOOD_RUN
         self.stream_status = 200
         self.sessions = {"s1"}
+        # /p/<profile>/ prefixes: each profile has its own key, like the real one
+        self.profile_keys = {"lumen": "L" * 32}
 
     def start(self):
         fake = self
@@ -65,8 +67,19 @@ class FakeApi:
                 self.end_headers()
                 self.wfile.write(raw)
 
-            def _authed(self):
-                if self.headers.get("Authorization") != f"Bearer {KEY}":
+            def _route(self):
+                """Split an optional /p/<profile> prefix off the path."""
+                parts = self.path.split("/")
+                if len(parts) > 2 and parts[1] == "p":
+                    return parts[2], "/" + "/".join(parts[3:])
+                return None, self.path
+
+            def _authed(self, profile):
+                if profile is not None and profile not in fake.profile_keys:
+                    self._json(404, {"error": {"message": "unknown profile"}})
+                    return False
+                expected = KEY if profile is None else fake.profile_keys[profile]
+                if self.headers.get("Authorization") != f"Bearer {expected}":
                     self._json(401, {"error": {"message": "Invalid API key"}})
                     return False
                 return True
@@ -80,15 +93,16 @@ class FakeApi:
             def do_POST(self):
                 body = self._body()
                 fake.requests.append(("POST", self.path, body))
-                if not self._authed():
+                profile, path = self._route()
+                if not self._authed(profile):
                     return
-                if self.path == "/api/sessions":
+                if path == "/api/sessions":
                     fake.sessions.add("api_new")
                     return self._json(201, {"object": "hermes.session", "session": {"id": "api_new"}})
-                sid = self.path.split("/")[3]
+                sid = path.split("/")[3]
                 if sid not in fake.sessions:
                     return self._json(404, {"error": {"message": f"Session not found: {sid}"}})
-                if self.path.endswith("/chat/stream"):
+                if path.endswith("/chat/stream"):
                     if fake.stream_status != 200:
                         return self._json(fake.stream_status, {"error": {"message": "boom"}})
                     self.send_response(200)
@@ -98,7 +112,7 @@ class FakeApi:
                         self.wfile.write(frame)
                         self.wfile.flush()
                     return
-                if self.path.endswith("/chat"):
+                if path.endswith("/chat"):
                     return self._json(200, {"session_id": sid,
                                             "message": {"role": "assistant", "content": "PONG"}})
                 self._json(404, {})
@@ -369,3 +383,127 @@ def test_malformed_response_falls_back_instead_of_hanging(tmp_path, monkeypatch,
     finally:
         srv.close()
     assert cli_calls == [("s1", "hi", None, None)]
+
+
+# -- profiles (multiplexed gateway) ------------------------------------------------
+LUMEN_KEY = "L" * 32
+
+
+@pytest.fixture
+def lumen(tmp_path, monkeypatch):
+    """A `lumen` profile with its own key and state.db, used as the chat profile."""
+    home = tmp_path / "profiles" / "lumen"
+    home.mkdir(parents=True)
+    (home / ".env").write_text(f"MATTERMOST_TOKEN=x\nAPI_SERVER_KEY={LUMEN_KEY}\n")
+    monkeypatch.setenv("MER_CHAT_PROFILE", "lumen")
+    return home
+
+
+@pytest.fixture
+def mux_api(tmp_path, monkeypatch, fake_api):
+    api = HermesApi(tmp_path, url=fake_api.url, key=KEY, multiplex=lambda: True)
+    monkeypatch.setattr(bridge, "HERMES_API", api)
+    return fake_api
+
+
+def _make_full_db(path):
+    con = _make_state_db(path)
+    con.executescript(
+        """CREATE TABLE messages (id INTEGER PRIMARY KEY, session_id TEXT, role TEXT,
+               content TEXT, tool_name TEXT, timestamp REAL, active INTEGER DEFAULT 1);"""
+    )
+    return con
+
+
+def test_other_profiles_need_multiplexing_and_their_own_key(tmp_path, lumen):
+    off = HermesApi(tmp_path, key=KEY, multiplex=lambda: False)
+    on = HermesApi(tmp_path, key=KEY, multiplex=lambda: True)
+    assert not off.serves("lumen")
+    assert on.serves("lumen")
+    assert not on.serves("career")  # no profile .env / key -> the gateway would 401
+    assert not on.serves("../etc")  # never a path
+    assert on.key_for("lumen") == LUMEN_KEY and on.key_for("default") == KEY
+
+
+def test_profile_turn_uses_its_prefix_and_its_own_key(lumen, mux_api):
+    got = []
+    bridge.HERMES_API.stream_chat("s1", "hi", got.append, profile="lumen")
+    assert [c["delta"] for c in got if c["type"] == "answer"] == ["Hel", "lo"]
+    assert mux_api.requests[-1][1] == "/p/lumen/api/sessions/s1/chat/stream"
+
+
+def test_a_profile_is_never_sent_the_default_key(tmp_path, lumen, fake_api):
+    # lumen's key file says one thing; pretend it holds the default key instead
+    (lumen / ".env").write_text(f"API_SERVER_KEY={KEY}\n")
+    api = HermesApi(tmp_path, url=fake_api.url, key=KEY, multiplex=lambda: True)
+    with pytest.raises(HermesApiError) as e:
+        api.stream_chat("s1", "hi", lambda c: None, profile="lumen")
+    assert e.value.status == 401
+
+
+def test_chats_in_the_chat_profiles_db_are_listed_read_and_answered_as_that_profile(
+        client, lumen, mux_api, broadcasts, cli_calls):
+    """The bug the phone hit: MER_CHAT_PROFILE=lumen stores chats in lumen's own
+    state.db, while the bridge listed and read only the default one."""
+    now = time.time()
+    con = _make_full_db(bridge.STATE_DB)
+    con.execute("INSERT INTO sessions (id, source, title, last_activity_at) VALUES ('d1','mattermost','in default',?)",
+                (now - 5,))
+    con.commit()
+    con.close()
+    con = _make_full_db(lumen / "state.db")
+    con.execute("INSERT INTO sessions (id, source, title, last_activity_at) VALUES ('s1','cli','in lumen',?)", (now,))
+    con.execute("INSERT INTO messages (session_id, role, content, timestamp) VALUES ('s1','user','hello lumen',?)", (now,))
+    con.commit()
+    con.close()
+
+    listed = client.get("/api/v1/sessions", headers=auth()).json()
+    assert [(x["id"], x["profileId"]) for x in listed] == [("s1", "lumen"), ("d1", "mattermost")]
+    msgs = client.get("/api/v1/sessions/s1/messages", headers=auth()).json()
+    assert [m["text"] for m in msgs] == ["hello lumen"]
+
+    got, done = broadcasts
+    assert client.post("/api/v1/sessions/s1/messages", json={"text": "hi"}, headers=auth()).status_code == 200
+    assert done.wait(5)
+    assert cli_calls == []
+    assert mux_api.requests[-1][1] == "/p/lumen/api/sessions/s1/chat/stream"
+
+
+def test_default_db_chats_are_answered_by_the_default_profile_not_the_chat_profile(
+        client, lumen, fake_api, broadcasts, cli_calls):
+    now = time.time()
+    _make_full_db(lumen / "state.db").close()
+    con = _make_full_db(bridge.STATE_DB)
+    con.execute("INSERT INTO sessions (id, source, title, last_activity_at) VALUES ('s1','cli','x',?)", (now,))
+    con.commit()
+    con.close()
+    _, done = broadcasts
+    client.post("/api/v1/sessions/s1/messages", json={"text": "hi"}, headers=auth())
+    assert done.wait(5)
+    # served by the default gateway profile, not resumed as lumen
+    assert fake_api.requests[-1][1] == "/api/sessions/s1/chat/stream"
+
+
+def test_new_session_goes_into_the_profiles_own_db(client, lumen):
+    _make_full_db(bridge.STATE_DB).close()
+    _make_full_db(lumen / "state.db").close()
+    sid = client.post("/api/v1/sessions", json={"title": "t"}, headers=auth()).json()["id"]
+    con = sqlite3.connect(lumen / "state.db")
+    assert con.execute("SELECT source FROM sessions WHERE id=?", (sid,)).fetchone() == ("lumen",)
+
+
+def test_pin_and_delete_act_on_the_owning_db(client, lumen):
+    _make_full_db(bridge.STATE_DB).close()
+    con = _make_full_db(lumen / "state.db")
+    con.execute("INSERT INTO sessions (id, source, title) VALUES ('s1','cli','x')")
+    con.commit()
+    con.close()
+    client.post("/api/v1/sessions/s1/pin", headers=auth())
+    client.delete("/api/v1/sessions/s1", headers=auth())
+    con = sqlite3.connect(lumen / "state.db")
+    assert con.execute("SELECT pinned, hidden FROM sessions WHERE id='s1'").fetchone() == (1, 1)
+
+
+def test_invalid_profile_names_are_rejected(client):
+    r = client.post("/api/v1/sessions/s1/messages", json={"text": "hi", "profile": "../../etc"}, headers=auth())
+    assert r.status_code == 400

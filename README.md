@@ -91,7 +91,7 @@ install and returns live data:
 | Data | Source (real) |
 |------|---------------|
 | Sessions & messages | `~/.hermes/state.db` (SQLite) |
-| Chat (streaming) | the resident gateway's **API server** (`127.0.0.1:8642`, SSE) for the default profile; `hermes chat --resume <session>` subprocess for other profiles, image turns, or when the API server is down. Streamed to the app over WebSocket either way |
+| Chat (streaming) | the resident gateway's **API server** (`127.0.0.1:8642`, SSE; other profiles under `/p/<profile>/` when the gateway multiplexes them); `hermes chat --resume <session>` subprocess for image turns or when the API server can't take the turn. Streamed to the app over WebSocket either way |
 | Memory | `~/.hermes/memories/USER.md` + `MEMORY.md` |
 | Cron jobs | `~/.hermes/cron/jobs.json` |
 | Skills | `~/.hermes/skills/**/SKILL.md` |
@@ -108,6 +108,12 @@ uvicorn server.bridge:app --port 9130
 ```
 Chat goes through the Hermes gateway's API server when it is enabled (`API_SERVER_KEY` in
 `~/.hermes/.env`). The bridge reads that one key from the file, so it isn't copied anywhere.
+With `gateway.multiplex_profiles: true` the same gateway serves every profile under `/p/<profile>/`,
+each authenticated by its own `API_SERVER_KEY` in `~/.hermes/profiles/<profile>/.env`.
+
+Hermes keeps **one `state.db` per profile**. The bridge lists the default profile's chats plus those of
+`MER_CHAT_PROFILE` (the profile new chats from the app run as), and every read, send, pin or delete
+goes to the profile whose database holds that chat.
 Override with `HERMES_API_URL` / `HERMES_API_KEY`. `GET /api/v1/status` reports `hermesApi: true`
 while the API server is in use. A turn it can't take falls back to the CLI; a turn that fails
 half-way is reported, not re-run (that would answer twice).
@@ -164,7 +170,7 @@ build a trojaned in-place update.) Keep one keystore per app so updates install 
 
 ```bash
 flutter analyze && flutter test          # 24 tests: repository, ApiFailure, reconnect, AppState, banner
-cd server && python -m pytest tests -q   # 62 tests: bridge auth surface, memory/cron/servers routes, API-server chat transport
+cd server && python -m pytest tests -q   # 70 tests: bridge auth surface, memory/cron/servers routes, API-server chat transport, per-profile chats
 python3 tools/contract_check.py          # every route the app calls must exist on the bridge
 ```
 

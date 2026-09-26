@@ -43,9 +43,9 @@ from starlette.requests import Request
 from starlette.responses import FileResponse, JSONResponse, Response
 
 try:  # run as `python server/bridge.py` (the systemd unit) or with server/ on sys.path (tests)
-    from hermes_api import HermesApi, HermesApiError
+    from hermes_api import HermesApi, HermesApiError, named_profile
 except ImportError:  # `uvicorn server.bridge:app` from the repo root
-    from server.hermes_api import HermesApi, HermesApiError
+    from server.hermes_api import HermesApi, HermesApiError, named_profile
 
 HERMES = Path(os.environ.get("HERMES_HOME", str(Path.home() / ".hermes")))
 STATE_DB = HERMES / "state.db"
@@ -104,7 +104,8 @@ CORS_ORIGINS = [
 HERMES_BIN = os.environ.get("HERMES_BIN", "/home/hermes/.local/bin/hermes")
 # The resident gateway's API server. Chat turns for the profiles it serves go
 # through it; everything else (and any turn it can't take) uses HERMES_BIN.
-HERMES_API = HermesApi(HERMES)
+HERMES_API = HermesApi(
+    HERMES, multiplex=lambda: bool((_config().get("gateway") or {}).get("multiplex_profiles")))
 # Firebase service-account JSON for FCM push (server-side). Optional.
 FCM_SERVICE_ACCOUNT = os.environ.get(
     "FCM_SERVICE_ACCOUNT", "/home/hermes/.hermes/secrets/mercury-fcm-service-account.json"
@@ -229,10 +230,49 @@ def _broadcast(session_id: str, payload: dict) -> None:
 # ---------------------------------------------------------------------------
 # Low-level helpers
 # ---------------------------------------------------------------------------
-def _db() -> sqlite3.Connection:
-    con = sqlite3.connect(STATE_DB)
+def _profile_db_path(profile: str | None) -> Path:
+    """Hermes keeps one state.db per profile: a chat run as `lumen` is stored in
+    profiles/lumen/state.db, never in the default one."""
+    name = named_profile(profile)
+    return STATE_DB if name is None else PROFILES_DIR / name / "state.db"
+
+
+def _db(profile: str | None = None) -> sqlite3.Connection:
+    con = sqlite3.connect(_profile_db_path(profile))
     con.row_factory = sqlite3.Row
     return con
+
+
+def _listed_profiles() -> list[str | None]:
+    """Profiles whose chats the app lists: the default one, plus the chat profile
+    (MER_CHAT_PROFILE) that new chats from the app run as."""
+    out: list[str | None] = [None]
+    try:
+        chat = named_profile(_chat_profile())
+    except ValueError:
+        chat = None
+    if chat and _profile_db_path(chat).exists():
+        out.append(chat)
+    return out
+
+
+def _session_owner(session_id: str) -> str:
+    """The profile whose state.db holds this session ("default" if none does)."""
+    for prof in reversed(_listed_profiles()):
+        path = _profile_db_path(prof)
+        if not path.exists():
+            continue
+        try:
+            con = _db(prof)
+            try:
+                hit = con.execute("SELECT 1 FROM sessions WHERE id=?", (session_id,)).fetchone()
+            finally:
+                con.close()
+        except sqlite3.Error:
+            continue
+        if hit:
+            return prof or "default"
+    return "default"
 
 
 def _now() -> float:
@@ -330,7 +370,7 @@ def _send_push(title: str, body: str, data: dict | None = None) -> int:
 def _send_chat_reply_push(session_id: str) -> None:
     """After a chat reply finishes, read the last assistant text and push it."""
     try:
-        con = _db()
+        con = _db(_session_owner(session_id))
         row = con.execute(
             """SELECT content FROM messages
                WHERE session_id=? AND role='assistant' AND content IS NOT NULL
@@ -397,39 +437,51 @@ def _gateway_up() -> bool:
 
 @app.get("/api/v1/sessions")
 def sessions():
-    con = _db()
-    rows = con.execute(
-        """SELECT id, title, display_name, last_activity_at, started_at,
-                  last_activity_description, message_count, pinned, source
-           FROM sessions WHERE archived=0 AND hidden=0
-           ORDER BY last_activity_at DESC LIMIT 200"""
-    ).fetchall()
-    con.close()
     out = []
-    for r in rows:
-        title = r["title"] or r["display_name"] or r["source"] or "Conversation"
-        ts = r["last_activity_at"] or r["started_at"] or _now()
-        out.append(
-            {
-                "id": r["id"],
-                "title": title,
-                "lastPreview": (r["last_activity_description"] or "")[:140],
-                "lastTimestamp": _iso(ts),
-                "unreadCount": 0,
-                "pinned": bool(r["pinned"]),
-                "starred": False,
+    for prof in _listed_profiles():
+        if prof is not None and not _profile_db_path(prof).exists():
+            continue
+        con = _db(prof)
+        try:
+            rows = con.execute(
+                """SELECT id, title, display_name, last_activity_at, started_at,
+                          last_activity_description, message_count, pinned, source
+                   FROM sessions WHERE archived=0 AND hidden=0
+                   ORDER BY last_activity_at DESC LIMIT 200"""
+            ).fetchall()
+        finally:
+            con.close()
+        for r in rows:
+            title = r["title"] or r["display_name"] or r["source"] or "Conversation"
+            ts = r["last_activity_at"] or r["started_at"] or _now()
+            if prof is not None:
+                # a profile's own db: the profile is who you are talking to
+                profile_id = prof
+            else:
                 # Sessions started through the API server are the default
                 # profile's; show them under the same bot as CLI-started ones.
-                "profileId": ("hermes" if r["source"] == "api_server" else r["source"]) or "hermes",
-                "color": _hash_color(r["id"]),
-            }
-        )
-    return out
+                profile_id = ("hermes" if r["source"] == "api_server" else r["source"]) or "hermes"
+            out.append(
+                {
+                    "id": r["id"],
+                    "title": title,
+                    "lastPreview": (r["last_activity_description"] or "")[:140],
+                    "lastTimestamp": _iso(ts),
+                    "unreadCount": 0,
+                    "pinned": bool(r["pinned"]),
+                    "starred": False,
+                    "profileId": profile_id,
+                    "color": _hash_color(r["id"]),
+                    "_ts": ts,
+                }
+            )
+    out.sort(key=lambda x: x.pop("_ts"), reverse=True)
+    return out[:200]
 
 
 @app.get("/api/v1/sessions/{session_id}/messages")
 def messages(session_id: str):
-    con = _db()
+    con = _db(_session_owner(session_id))
     rows = con.execute(
         """SELECT id, role, content, tool_name, timestamp
            FROM messages WHERE session_id=? AND active=1
@@ -645,7 +697,11 @@ def create_session(body: dict):
     base_title = (body.get("title") or "New conversation")[:200]
     title = base_title
     profile = (body.get("profile") or body.get("profileId") or _chat_profile() or "hermes").strip()
-    con = _db()
+    try:
+        db_profile = profile if _profile_db_path(profile).exists() else None
+    except ValueError:
+        raise HTTPException(status_code=400, detail="invalid profile")
+    con = _db(db_profile)
     try:
         con.execute(
             """INSERT INTO sessions (id, source, title, started_at, last_activity_at,
@@ -676,10 +732,10 @@ def create_session(body: dict):
     }
 
 
-def _session_title(session_id: str) -> str | None:
+def _session_title(session_id: str, profile: str | None = None) -> str | None:
     """The title Hermes gave a session (auto-titling may not have run yet)."""
     try:
-        con = _db()
+        con = _db(profile)
         try:
             row = con.execute("SELECT title FROM sessions WHERE id=?", (session_id,)).fetchone()
         finally:
@@ -699,7 +755,7 @@ def chat_start(body: dict):
     profile = (body.get("profile") or body.get("profileId") or _chat_profile() or "").strip() or None
     if HERMES_API.serves(profile) and HERMES_API.available():
         try:
-            sid = HERMES_API.create_session(title=body.get("name") or None)
+            sid = HERMES_API.create_session(title=body.get("name") or None, profile=profile)
         except HermesApiError as e:
             print(f"[bridge] API server could not create a session ({e}); using the CLI", flush=True)
         else:
@@ -707,10 +763,10 @@ def chat_start(body: dict):
             # rather than retried through the CLI (that would start a second chat).
             try:
                 # same limit the CLI path has always had for a first turn
-                result = HERMES_API.chat(sid, text, timeout=180)
+                result = HERMES_API.chat(sid, text, timeout=180, profile=profile)
             except HermesApiError as e:
                 raise HTTPException(status_code=502, detail=f"hermes failed: {e}")
-            title = (_session_title(result["session_id"]) or body.get("name") or text)[:200]
+            title = (_session_title(result["session_id"], profile) or body.get("name") or text)[:200]
             return {
                 "id": result["session_id"],
                 "title": title,
@@ -756,7 +812,13 @@ def chat_start(body: dict):
 def send_message(session_id: str, body: dict):
     text = (body.get("text") or "").strip()
     attachments = body.get("attachments") or []
-    profile = body.get("profile") or body.get("profileId")
+    # The profile that owns the session runs the turn: resuming it as any other
+    # profile would look in the wrong state.db and lose the history.
+    profile = body.get("profile") or body.get("profileId") or _session_owner(session_id)
+    try:
+        named_profile(profile)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="invalid profile")
     _spawn_hermes(session_id, text, attachments, profile=profile)
     return {"ok": True, "pending": True}
 
@@ -791,7 +853,8 @@ def _spawn_hermes(
         # resident gateway when it serves this profile.
         if img_path is None and HERMES_API.serves(prof) and HERMES_API.available():
             try:
-                HERMES_API.stream_chat(session_id, query, lambda c: _broadcast(session_id, c))
+                HERMES_API.stream_chat(session_id, query, lambda c: _broadcast(session_id, c),
+                                       profile=prof)
                 _broadcast(session_id, {"event": "done"})
                 _send_chat_reply_push(session_id)
                 return
@@ -815,8 +878,8 @@ def _run_hermes_cli(session_id: str, query: str, img_path: str | None, prof: str
     cmd = [HERMES_BIN, "chat", "-q", query, "--resume", session_id]
     if img_path:
         cmd += ["--image", img_path]
-    if prof:
-        cmd += ["-p", prof]
+    if named_profile(prof):
+        cmd += ["-p", named_profile(prof)]
     # start_new_session: run hermes in its own process group/session so
     # stray SIGHUP/SIGTERM sent to the bridge's group can't interrupt the
     # in-flight model call. stdin=/dev/null: no inherited terminal.
@@ -1073,7 +1136,7 @@ async def ws_chat(websocket: WebSocket, session_id: str):
 
 @app.post("/api/v1/sessions/{session_id}/read")
 def mark_read(session_id: str):
-    con = _db()
+    con = _db(_session_owner(session_id))
     con.execute("UPDATE sessions SET last_read_at=? WHERE id=?", (_now(), session_id))
     con.commit()
     con.close()
@@ -1082,7 +1145,7 @@ def mark_read(session_id: str):
 
 @app.post("/api/v1/sessions/{session_id}/pin")
 def toggle_pin(session_id: str):
-    con = _db()
+    con = _db(_session_owner(session_id))
     con.execute("UPDATE sessions SET pinned = 1 - pinned WHERE id=?", (session_id,))
     con.commit()
     con.close()
@@ -1096,7 +1159,7 @@ def toggle_star(session_id: str):
 
 @app.delete("/api/v1/sessions/{session_id}")
 def delete_session(session_id: str):
-    con = _db()
+    con = _db(_session_owner(session_id))
     con.execute("UPDATE sessions SET hidden=1 WHERE id=?", (session_id,))
     con.commit()
     con.close()
@@ -1412,7 +1475,7 @@ def tools():
 
 @app.get("/api/v1/activity")
 def activity(session_id: str | None = None, limit: int = 60):
-    con = _db()
+    con = _db(_session_owner(session_id) if session_id else None)
     if session_id:
         rows = con.execute(
             """SELECT id, session_id, tool_name, content, timestamp

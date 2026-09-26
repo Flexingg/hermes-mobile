@@ -6,16 +6,22 @@ few hundred MB each). This module only relays: it never decides anything, it
 turns the API server's SSE events into the chunk contract the app already speaks
 (``{"event": "chunk", "type": answer|thinking|technical, "delta": ...}``).
 
+Profiles: with ``gateway.multiplex_profiles`` on, the one gateway also serves every
+other profile under ``/p/<profile>/``, and authenticates each with that profile's
+own API_SERVER_KEY (it fails closed rather than accept the default key).
+
 Configuration (all optional):
   HERMES_API_URL   default http://127.0.0.1:8642
-  HERMES_API_KEY   default: API_SERVER_KEY read from $HERMES_HOME/.env, so the
-                   key is never copied into a second file
+  HERMES_API_KEY   the default profile's key; default: API_SERVER_KEY read from
+                   $HERMES_HOME/.env. A named profile's key is read from
+                   $HERMES_HOME/profiles/<name>/.env. Keys are never copied.
 """
 from __future__ import annotations
 
 import http.client
 import json
 import os
+import re
 import threading
 import time
 from pathlib import Path
@@ -31,9 +37,19 @@ TURN_TIMEOUT = 1800.0  # a single agent turn may run tools for a long time
 # would end the relay thread without the "done" the app is waiting for.
 _TRANSPORT_ERRORS = (OSError, http.client.HTTPException)
 
-# The API server serves the default profile only until gateway.multiplex_profiles
-# is on (then /p/<profile>/ reaches the others). These names all mean "default".
+# These names all mean the gateway's own (default) profile.
 _DEFAULT_PROFILE_NAMES = {"", "hermes", "default"}
+_PROFILE_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
+
+
+def named_profile(profile: str | None) -> str | None:
+    """None for the default profile, else the validated profile name."""
+    name = (profile or "").strip().lower()
+    if name in _DEFAULT_PROFILE_NAMES:
+        return None
+    if not _PROFILE_NAME_RE.match(name):
+        raise ValueError(f"invalid profile name: {profile!r}")
+    return name
 
 
 class HermesApiError(Exception):
@@ -59,10 +75,14 @@ def _read_env_key(hermes_home: Path) -> str:
 
 
 class HermesApi:
-    def __init__(self, hermes_home: Path, url: str | None = None, key: str | None = None):
+    def __init__(self, hermes_home: Path, url: str | None = None, key: str | None = None,
+                 multiplex: Callable[[], bool] | None = None):
         self.url = (url or os.environ.get("HERMES_API_URL") or DEFAULT_URL).rstrip("/")
         self._hermes_home = hermes_home
         self._key = key if key is not None else os.environ.get("HERMES_API_KEY")
+        # Whether the gateway multiplexes profiles; read live, so turning it on or
+        # off needs no bridge restart.
+        self._multiplex = multiplex or (lambda: False)
         self._health: tuple[float, bool] = (0.0, False)
         self._lock = threading.Lock()
 
@@ -73,9 +93,27 @@ class HermesApi:
             self._key = _read_env_key(self._hermes_home)
         return self._key or ""
 
+    def key_for(self, profile: str | None) -> str:
+        name = named_profile(profile)
+        if name is None:
+            return self.key
+        return _read_env_key(self._hermes_home / "profiles" / name)
+
     def serves(self, profile: str | None) -> bool:
         """Whether a turn for ``profile`` can go through the API server."""
-        return (profile or "").strip().lower() in _DEFAULT_PROFILE_NAMES
+        try:
+            name = named_profile(profile)
+        except ValueError:
+            return False
+        if name is None:
+            return True
+        # Another profile needs the gateway to multiplex, and its own key.
+        return bool(self._multiplex()) and bool(self.key_for(name))
+
+    @staticmethod
+    def _prefix(profile: str | None) -> str:
+        name = named_profile(profile)
+        return "" if name is None else f"/p/{name}"
 
     def available(self) -> bool:
         """Cached health check; False when no key is configured."""
@@ -104,15 +142,17 @@ class HermesApi:
         cls = http.client.HTTPSConnection if parts.scheme == "https" else http.client.HTTPConnection
         return cls(parts.hostname, parts.port, timeout=timeout)
 
-    def _headers(self) -> dict:
-        return {"Authorization": f"Bearer {self.key}", "Content-Type": "application/json"}
+    def _headers(self, profile: str | None = None) -> dict:
+        return {"Authorization": f"Bearer {self.key_for(profile)}",
+                "Content-Type": "application/json"}
 
     def _request(self, method: str, path: str, body: dict | None = None,
-                 timeout: float = CONNECT_TIMEOUT) -> tuple[int, dict]:
+                 timeout: float = CONNECT_TIMEOUT, profile: str | None = None) -> tuple[int, dict]:
         conn = self._conn(timeout)
         try:
-            conn.request(method, path, body=json.dumps(body) if body is not None else None,
-                         headers=self._headers())
+            conn.request(method, self._prefix(profile) + path,
+                         body=json.dumps(body) if body is not None else None,
+                         headers=self._headers(profile))
             resp = conn.getresponse()
             raw = resp.read()
         except _TRANSPORT_ERRORS as exc:
@@ -127,11 +167,11 @@ class HermesApi:
         return resp.status, data
 
     # -- sessions ------------------------------------------------------------
-    def create_session(self, title: str | None = None) -> str:
+    def create_session(self, title: str | None = None, profile: str | None = None) -> str:
         body: dict = {"source": "api_server"}
         if title:
             body["title"] = title[:200]
-        status, data = self._request("POST", "/api/sessions", body)
+        status, data = self._request("POST", "/api/sessions", body, profile=profile)
         if status not in (200, 201):
             raise HermesApiError(_error_text(data, "could not create session"), status=status)
         session = data.get("session") or data
@@ -140,11 +180,12 @@ class HermesApi:
             raise HermesApiError("API server returned no session id", status=status)
         return sid
 
-    def chat(self, session_id: str, text: str, timeout: float = TURN_TIMEOUT) -> dict:
+    def chat(self, session_id: str, text: str, timeout: float = TURN_TIMEOUT,
+             profile: str | None = None) -> dict:
         """One synchronous turn; returns ``{"session_id", "content"}``."""
         status, data = self._request(
             "POST", f"/api/sessions/{quote(session_id, safe='')}/chat",
-            {"message": text}, timeout=timeout,
+            {"message": text}, timeout=timeout, profile=profile,
         )
         if status != 200:
             raise HermesApiError(_error_text(data, "chat failed"), status=status)
@@ -153,7 +194,8 @@ class HermesApi:
             "content": ((data.get("message") or {}).get("content") or ""),
         }
 
-    def stream_chat(self, session_id: str, text: str, emit: Callable[[dict], None]) -> None:
+    def stream_chat(self, session_id: str, text: str, emit: Callable[[dict], None],
+                    profile: str | None = None) -> None:
         """Run one turn and relay it as bridge chunks through ``emit``.
 
         Emits ``{"event": "chunk", ...}`` payloads only; the caller sends ``done``.
@@ -164,8 +206,9 @@ class HermesApi:
         started = False
         try:
             try:
-                conn.request("POST", f"/api/sessions/{quote(session_id, safe='')}/chat/stream",
-                             body=json.dumps({"message": text}), headers=self._headers())
+                conn.request("POST", self._prefix(profile)
+                             + f"/api/sessions/{quote(session_id, safe='')}/chat/stream",
+                             body=json.dumps({"message": text}), headers=self._headers(profile))
                 resp = conn.getresponse()
             except _TRANSPORT_ERRORS as exc:
                 self.mark_down()

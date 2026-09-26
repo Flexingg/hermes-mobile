@@ -1,6 +1,6 @@
 # Plan — Projects, per-repo agents, and the Hermes orchestrator
 
-Status: **v2; Phase 0 done, §13 calls done, Phase 1 done (§14)** (2026-09-26). Decisions are in §10, Phase 0 findings in §12.
+Status: **v2; Phase 0, §13 calls, Phase 1 (§14) and the switch-over (§15) done** (2026-09-26). Decisions are in §10, Phase 0 findings in §12.
 
 > **v2 change:** v1 made the bridge a second orchestrator (it filed issues, polled GitHub,
 > followed CI and governed RAM). That was wrong. **Hermes is the only brain. Mercury is its
@@ -295,6 +295,25 @@ in the worktree (OK), and `main` on the remote is unchanged (`cdecb2a`).
   `flutter test` green (the app is unchanged).
 - **Not yet:** project (`dev-*`) chats through the API server need multiplexing (§13.2) and are part of the
   switch-over.
+
+## 15. Switch-over (2026-09-26): done
+
+- **Root cause of "chats keep failing" on the phone** (found while doing this): the bridge runs app chats as
+  `MER_CHAT_PROFILE=lumen`. (1) `lumen` and the five other non-`dev` profiles were still on the exhausted Nous
+  route, so they're now switched to direct DeepSeek (backed up, each tested). (2) Hermes stores a profile's chats in
+  **that profile's** `state.db`, but the bridge only read the default one, so app-started chats never listed
+  or reloaded. The bridge now resolves each chat's owning profile (second commit on PR #1).
+- `gateway.multiplex_profiles: true` on the default gateway. All 17 secondary gateway units are stopped **and
+  disabled**. In each of the 19 secondary profiles, `platforms.mattermost/webhook/api_server.enabled: false`
+  (configs backed up), so **`@hermes` is the only Mattermost bot**, per decision 5. Each profile got its own
+  generated `API_SERVER_KEY` (the gateway authenticates `/p/<profile>/` with that profile's key and refuses the
+  default key there, which was verified live both ways).
+- Side effect fixed: `@hermes`'s webhook listener had been failing to bind :8644 (1,432 retries) because a `dev-*`
+  gateway held the port.
+- **Known leftover:** `homie`'s Home Assistant adapter still connects inside the gateway. Hermes' `HASS_TOKEN` loader
+  forces the platform on and ignores `enabled: false` (`gateway/config.py:2234`, unlike Mattermost). It is inert:
+  with no `watch_*` filters every event is dropped (`adapter.py:310`), so it triggers no agent turns.
+- Cron: the gateway now ticks cron for all 20 profiles. No secondary profile had an active recurring job.
 
 ## 13a. Original questions (for the record)
 
