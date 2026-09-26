@@ -1,5 +1,8 @@
+import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
+import '../../core/config/app_config.dart';
+import '../../core/overlay/overlay_control.dart';
 import '../../state/app_state.dart';
 import '../../widgets/common.dart';
 import '../chat/chat_list_page.dart';
@@ -20,6 +23,35 @@ class HomeShell extends StatefulWidget {
 
 class _HomeShellState extends State<HomeShell> {
   int _index = 0;
+  StreamSubscription<String>? _overlaySessions;
+
+  @override
+  void initState() {
+    super.initState();
+    // The overlay creates its Assistant session from its own engine; the chat
+    // list here only learns about it through this event.
+    final state = context.read<AppState>();
+    _overlaySessions =
+        OverlayControl.sessionCreated.listen((_) => state.refreshSessions());
+    _resumeOverlay();
+  }
+
+  /// The overlay service doesn't survive the app's process being killed (it
+  /// may only be started from a visible activity), so bring it back when the
+  /// user opens Mercury with the floating assistant switched on.
+  Future<void> _resumeOverlay() async {
+    final config = context.read<AppConfig>();
+    if (!config.overlayEnabled) return;
+    if (await OverlayControl.hasPermission() && !await OverlayControl.isRunning()) {
+      await OverlayControl.start();
+    }
+  }
+
+  @override
+  void dispose() {
+    _overlaySessions?.cancel();
+    super.dispose();
+  }
 
   /// Work waiting on the user: PRs ready to test plus tasks that need them.
   int _attention(AppState state) => state.projects.fold(0, (n, p) => n + p.ready + p.needsYou);
