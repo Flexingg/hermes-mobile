@@ -34,7 +34,18 @@ enum TaskPhase {
         _ => queued,
       };
 
+  /// The name the scripts and the bridge use (`ci_retry`, `needs_you`), not the
+  /// Dart camelCase one — this goes back to Hermes in an intent payload.
+  String get wire => switch (this) {
+        TaskPhase.ciRetry => 'ci_retry',
+        TaskPhase.needsYou => 'needs_you',
+        _ => name,
+      };
+
   bool get isActive => this == queued || this == working || this == review || this == ciRetry;
+
+  /// The work is over: merged, closed, done or cancelled.
+  bool get isFinished => !isActive && this != ready;
 }
 
 /// A project's headline state, most urgent first.
@@ -71,6 +82,7 @@ class ProjectTask {
   final String? coder;
   final String? branch;
   final String? blockedReason;
+  final DateTime? mergedAt;
   final DateTime? updatedAt;
 
   const ProjectTask({
@@ -87,6 +99,7 @@ class ProjectTask {
     this.coder,
     this.branch,
     this.blockedReason,
+    this.mergedAt,
     this.updatedAt,
   });
 
@@ -104,11 +117,19 @@ class ProjectTask {
         coder: j['coder'] as String?,
         branch: j['branch'] as String?,
         blockedReason: j['blockedReason'] as String?,
+        mergedAt: DateTime.tryParse((j['mergedAt'] ?? '').toString()),
         updatedAt: DateTime.tryParse((j['updatedAt'] ?? '').toString()),
       );
 
   bool get canRetry => phase == TaskPhase.needsYou;
   bool get canCancel => phase == TaskPhase.queued;
+
+  /// Tap-through: every task has a detail page, including finished ones.
+  /// Suggesting an edit only makes sense once something exists to change.
+  bool get canSuggestEdit => phase != TaskPhase.cancelled && phase != TaskPhase.queued;
+
+  /// A follow-up issue is for work that already landed (or was refused).
+  bool get canFileFollowUp => phase.isFinished;
 }
 
 class Project {

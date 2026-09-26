@@ -701,3 +701,136 @@ def test_gates_find_per_user_toolchains(env, repo, coder):
                       PATH="/usr/bin:/bin")
     assert rc == 0, out
     assert "flutter-ran" in out["gates"]["tail"]
+
+
+# -- a merged PR closes its own task -------------------------------------------------------
+def _published(env, **extra):
+    """A task that has shipped: in review, with a PR and (from `prepare`) a worktree."""
+    state = env.task_state("t_abc")
+    state.update({"phase": "review", "prNumber": 9, "ci": "pending", **extra})
+    (env.root / "mercury" / "tasks" / "t_abc.json").write_text(json.dumps(state))
+    return state
+
+
+def _pr_state(env, state, sha="sha1"):
+    env.respond("gh", ["pr", "view"], json.dumps({"state": state, "headRefOid": sha, "url": "pr-url",
+                                                 "title": "Add card", "statusCheckRollup": []}))
+
+
+def _ci(env, url):
+    return subprocess.run([sys.executable, str(SCRIPTS / "mercury_ci.py"), "--apply"], capture_output=True,
+                          text=True, env=env.environ(MERCURY_BRIDGE_URL=url))
+
+
+def test_a_merged_pr_closes_the_task_tells_the_phone_and_cleans_up(env, shipped, bridge):
+    got, url = bridge
+    _published(env)
+    _pr_state(env, "MERGED")
+    p = _ci(env, url)
+    assert p.returncode == 0, p.stdout + p.stderr
+    assert "closed demo #42 PR #9 (merged)" in p.stdout, p.stdout
+    assert "cleaned worktree" in p.stdout
+
+    # the task is finished, and says when
+    state = env.task_state("t_abc")
+    assert state["phase"] == "merged" and state["mergedAt"] > 0
+    assert env.called("hermes", "kanban", "--board", "demo", "complete", "t_abc")
+    assert env.called("hermes", "kanban", "--board", "demo", "comment", "t_abc")
+
+    # the phone hears about it, once
+    assert [g["body"]["kind"] for g in got] == ["merged"]
+    assert got[0]["body"]["title"] == "demo #42 merged"
+
+    # nothing is left behind: no worktree, no branch here or on the remote
+    assert not shipped["wt"].exists()
+    e = shipped["env"]
+    assert "demo/t_abc-fix" not in git(shipped["main"], "branch", "--list", env=e)
+    api_deletes = [c for c in env.called("gh", "api") if "DELETE" in c["argv"]]
+    assert api_deletes and "refs/heads/demo/t_abc-fix" in api_deletes[0]["argv"][-1]
+
+    # and it is not followed again
+    assert _ci(env, url).stdout == ""
+
+
+def test_a_pr_closed_without_merging_ends_the_task_but_keeps_the_branch(env, shipped, bridge):
+    got, url = bridge
+    _published(env)
+    _pr_state(env, "CLOSED")
+    p = _ci(env, url)
+    assert "closed demo #42 PR #9 (not merged — branch kept)" in p.stdout, p.stdout
+    assert env.task_state("t_abc")["phase"] == "closed"
+    assert env.called("hermes", "kanban", "--board", "demo", "complete", "t_abc")
+    assert [g["body"]["kind"] for g in got] == ["info"]  # reported, not a push to act on
+    # nothing landed, so nothing is deleted
+    assert shipped["wt"].exists()
+    assert "demo/t_abc-fix" in git(shipped["main"], "branch", "--list", env=shipped["env"])
+    assert not [c for c in env.called("gh", "api") if "DELETE" in c["argv"]]
+
+
+def test_a_report_run_only_says_what_it_would_do(env, shipped, bridge):
+    _, url = bridge
+    _published(env)
+    _pr_state(env, "MERGED")
+    p = subprocess.run([sys.executable, str(SCRIPTS / "mercury_ci.py")], capture_output=True, text=True,
+                       env=env.environ(MERCURY_BRIDGE_URL=url))
+    assert "would close demo #42 PR #9 (merged)" in p.stdout, p.stdout
+    assert env.task_state("t_abc")["phase"] == "review"  # untouched
+    assert shipped["wt"].exists()
+    assert not env.called("hermes", "kanban", "--board", "demo", "complete")
+
+
+# -- mercury_tunnel.py ---------------------------------------------------------------------
+def _fake_cloudflared(env, url="https://tidy-llama-sings.trycloudflare.com"):
+    """A cloudflared that prints a quick-tunnel URL, then keeps running."""
+    p = env.bin / "cloudflared"
+    p.write_text("#!/usr/bin/env bash\n"
+                 'echo "INF Requesting new quick Tunnel on trycloudflare.com..."\n'
+                 f'echo "INF |  {url}  |"\n'
+                 "sleep 60\n")
+    p.chmod(0o755)
+    return p
+
+
+def test_tunnel_up_reports_the_url_status_finds_it_and_down_stops_it(env):
+    _fake_cloudflared(env)
+    # The process path: a real host uses a systemd --user unit, which tests must
+    # not create.
+    cf = {"MERCURY_CLOUDFLARED": str(env.bin / "cloudflared"), "MERCURY_TUNNEL_SYSTEMD": "0"}
+    rc, out = env.run("mercury_tunnel.py", "up", "--port", "9130", **cf)
+    assert rc == 0, out
+    assert out["url"] == "https://tidy-llama-sings.trycloudflare.com" and out["kind"] == "quick"
+    assert out["mode"] == "process"
+    assert "BRIDGE_TOKEN" in out["note"]  # the edge is not the only gate
+
+    rc, up = env.run("mercury_tunnel.py", "status", **cf)
+    assert up["up"] is True and up["url"] == out["url"] and up["kind"] == "quick"
+
+    # a second `up` reports the tunnel that is already there instead of starting one
+    rc, again = env.run("mercury_tunnel.py", "up", **cf)
+    assert again["url"] == out["url"]
+
+    rc, down = env.run("mercury_tunnel.py", "down", **cf)
+    assert rc == 0 and down["stopped"] is True and str(out["pid"]) in down["how"]
+    rc, after = env.run("mercury_tunnel.py", "status", **cf)
+    assert after["up"] is False and after["url"] is None
+
+
+def test_tunnel_up_fails_clearly_without_cloudflared(env):
+    rc, out = env.run("mercury_tunnel.py", "up", MERCURY_CLOUDFLARED=str(env.tmp / "nope"))
+    assert rc == 1 and "cloudflared is not installed" in out["error"]
+
+
+def test_a_hostname_without_a_named_tunnel_setup_is_refused(env):
+    """--hostname promises a stable URL; without the cloudflared config there is none."""
+    _fake_cloudflared(env)
+    rc, out = env.run("mercury_tunnel.py", "up", "--hostname", "bridge.example.com",
+                      MERCURY_CLOUDFLARED=str(env.bin / "cloudflared"),
+                      MERCURY_CLOUDFLARED_CONFIG=str(env.tmp / "missing.yml"))
+    assert rc == 1 and "cloudflared tunnel create" in out["error"]
+
+
+def test_tunnel_down_is_a_no_op_with_nothing_running(env):
+    rc, out = env.run("mercury_tunnel.py", "down")
+    assert rc == 0 and out["stopped"] is False
+    rc, out = env.run("mercury_tunnel.py", "status")
+    assert out["up"] is False

@@ -471,6 +471,10 @@ def _list_sessions(profiles: list[str | None]) -> list[dict]:
                    FROM sessions WHERE archived=0 AND hidden=0
                    ORDER BY last_activity_at DESC LIMIT 200"""
             ).fetchall()
+        except sqlite3.Error:
+            # A profile whose db exists but is empty or older than the schema
+            # (a fresh profile directory, say) must not break the whole list.
+            continue
         finally:
             con.close()
         for r in rows:
@@ -543,24 +547,150 @@ def _tool_text(content, tool_name) -> str:
     return f"[{tool_name}] {snippet}"
 
 
+# ---------------------------------------------------------------------------
+# Hermes' CLI chrome is not the agent talking.
+#
+# `hermes chat` prints a session banner around the reply: "Session <id> found but
+# has no messages. Starting fresh.", a "Resume this session with:" hint, and a
+# "Title:/Duration:/Messages:" summary. Streamed straight through, those lines
+# landed in the transcript as if the assistant had said them — they match none of
+# the status prefixes below, so they were classified 'answer'. They are plumbing:
+# they never reach a bubble. The facts they carry become a `session_meta` event,
+# which the app renders as a collapsed row under the reply.
+# ---------------------------------------------------------------------------
+_ANSI_RE = re.compile(r"\x1b\[[0-9;]*[a-zA-Z]")
+
+_PLUMBING_PREFIXES = (
+    "Query:", "Initializing agent", "Session:", "session_id:", "Title:", "Duration:",
+    "Messages:", "Tools:", "Model:", "Profile:", "Tokens:", "Resume with:",
+    "Resume this session with:", "Connected to", "🔗",
+)
+_PLUMBING_RE = (
+    re.compile(r"^Session\s+\S+\s+found but has no messages"),
+    re.compile(r"^attaching\s+\d+\s+image\(s\)"),
+    re.compile(r"^hermes\s+(--resume|-c)\b"),  # the two hint commands under the banner
+    re.compile(r"^\d+\s*\(\d+\s+user.*tool call"),  # "2 (1 user, 0 tool calls)" summary tail
+    re.compile(r"^\S+\s+·\s+\d+s$"),  # "Assistant · 19s" style run footer
+    # The bare filename an "attaching N image(s)" banner wraps onto. A line that is
+    # only a filename is a file reference (the app shows those as chips), never the
+    # agent's prose.
+    re.compile(r"^[\w.\-]+\.(png|jpe?g|gif|webp|bmp|heic|pdf|txt|md|csv|json|apk|zip)$",
+               re.IGNORECASE),
+)
+# Banner label (lowercased) -> the key the app shows. Order of appearance wins.
+_META_KEYS = {
+    "session": "sessionId", "session_id": "sessionId", "title": "title",
+    "duration": "duration", "messages": "messages", "model": "model", "profile": "profile",
+}
+
+# Emitted once per turn instead of the banner text.
+_SESSION_META_EVENT = "session_meta"
+
+
+# The response panel: `╭─ ⚕ Hermes ──…──╮` … `╰─…─╯`. Its contents *are* the answer
+# (the label is the skin's `response_label`). Older bridge code treated every box
+# as a thinking box, so a `hermes chat` turn showed the reply as collapsed
+# "thinking" and the session banner as the answer — exactly backwards.
+_RESPONSE_BOX_RE = re.compile(r"^╭[─\s][^╮]*Hermes")
+# How much longer than the prompt the echoed "Query:" block may get before we
+# decide it was not an echo at all. The prompt wraps across lines; the echo is a
+# prefix of what we sent, so it can never be much longer.
+_ECHO_SLACK = 40
+
+
+def is_cli_plumbing(line: str) -> bool:
+    """True for a line of Hermes CLI chrome — never shown as the agent's words."""
+    s = _ANSI_RE.sub("", line or "").strip()
+    if not s:
+        return False
+    return s.startswith(_PLUMBING_PREFIXES) or any(r.match(s) for r in _PLUMBING_RE)
+
+
+def parse_cli_plumbing(lines: list[str]) -> dict:
+    """The session facts a turn's banner carried ({} when there was no banner)."""
+    meta: dict[str, str] = {}
+    for raw in lines:
+        s = _ANSI_RE.sub("", raw or "").strip()
+        m = re.match(r"^Session\s+(\S+)\s+found but has no messages", s)
+        if m:
+            meta.setdefault("sessionId", m.group(1))
+            meta.setdefault("note", "no messages in this session yet — started fresh")
+            continue
+        m = re.match(r"^hermes\s+--resume\s+(\S+)", s)
+        if m:
+            meta["resumeCommand"] = f"hermes --resume {m.group(1)}"
+            meta.setdefault("sessionId", m.group(1))
+            continue
+        m = re.match(r"^([A-Za-z_]+):\s*(.+)$", s)
+        if m:
+            key = _META_KEYS.get(m.group(1).strip().lower())
+            if key:
+                meta.setdefault(key, m.group(2).strip())
+    sid = meta.get("sessionId")
+    if sid:
+        meta.setdefault("resumeCommand", f"hermes --resume {sid}")
+    return meta
+
+
+def strip_cli_plumbing(text: str) -> str:
+    """`text` with Hermes' CLI chrome removed (bubbles and tasker answers)."""
+    kept = [ln for ln in _ANSI_RE.sub("", text or "").splitlines() if not is_cli_plumbing(ln)]
+    return "\n".join(kept).strip()
+
+
 def _classify_line(line: str, state: dict) -> str:
     """Classify a raw Hermes CLI output line for the UI.
 
-    Returns 'skip' (drop), 'thinking', 'technical' (status/tool noise) or
-    'answer' (the agent's actual reply). `state` carries whether we're inside
-    the '╭─ Hermes ─╮' thinking box across lines.
+    Returns 'skip' (drop), 'meta' (CLI plumbing — collected, never shown),
+    'thinking', 'technical' (status/tool noise) or 'answer' (the agent's actual
+    reply).
+
+    `state` carries, across lines: the box we are inside (`answer` for the
+    response panel, `chrome` for any other panel), whether a tool/status box is
+    open (the older `thinking` flag) and how much of the echoed prompt we have
+    dropped. Set `state["sent"]` to the text we handed the CLI so the echo of it
+    can be recognised.
     """
     s = line.strip()
     if not s:
         return "skip"
+    # `hermes chat -q` echoes the prompt as "Query: …", wrapping it over as many
+    # lines as it needs, and only stops at "Initializing agent...". The app
+    # already shows that text as the user's own message; left in, the wrapped tail
+    # is classified 'answer' and the assistant appears to repeat the user.
+    echo = state.get("echo")
+    if echo is not None:
+        if s.startswith("Initializing"):
+            state["echo"] = None
+            return "meta"
+        state["echo"] = echo + s
+        if len(state["echo"]) <= len(state.get("sent") or "") + _ECHO_SLACK:
+            return "meta"
+        # Longer than anything we sent: not an echo after all. Fall through and
+        # classify this line on its own merits.
+        state["echo"] = None
+    if s.startswith("Query:"):
+        state["echo"] = s[len("Query:"):].strip()
+        return "meta"
+    # Box borders. The response panel holds the answer; any other box is chrome.
     if s.startswith("╭"):
-        state["thinking"] = True
-        return "thinking"
+        state["box"] = "answer" if _RESPONSE_BOX_RE.match(s) else "chrome"
+        # Another kind of box (stash, clarify, …) keeps the old behaviour: its
+        # contents are collapsible, not the answer.
+        state["thinking"] = state["box"] == "chrome"
+        return "skip" if state["box"] == "answer" else "thinking"
     if s.startswith("╰"):
+        answer_box = state.pop("box", None) == "answer"
         state["thinking"] = False
-        return "thinking"
+        return "skip" if answer_box else "thinking"
+    if state.get("box") == "answer":
+        return "answer"
     if state.get("thinking"):
         return "thinking"
+    # Hermes' own session banner / run summary: collected for the meta row, never
+    # shown as the agent's words.
+    if is_cli_plumbing(s):
+        return "meta"
     # Tool-progress lines are drawn with a leading ┊ bar.
     if s.startswith("┊"):
         return "technical"
@@ -685,13 +815,13 @@ def _run_group_agent(gid: str, agent: str, text: str) -> None:
             stdin=subprocess.DEVNULL, start_new_session=True,
         )
         if proc.stdout is not None:
-            state = {"thinking": False}
+            state = {"thinking": False, "sent": text}
             for line in proc.stdout:
                 line = line.rstrip("\n")
                 if not line.strip():
                     continue
                 t = _classify_line(line, state)
-                if t == "skip":
+                if t in ("skip", "meta"):
                     continue
                 _broadcast(gid, {"event": "chunk", "agent": agent,
                                 "type": t, "delta": line + "\n"})
@@ -915,15 +1045,25 @@ def _run_hermes_cli(session_id: str, query: str, img_path: str | None, prof: str
         cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
         stdin=subprocess.DEVNULL, start_new_session=True,
     )
-    state = {"thinking": False}
+    # `sent` lets the classifier recognise the echo of the prompt we just handed
+    # the CLI (it wraps, and the wrapped tail is not the agent talking).
+    state = {"thinking": False, "sent": query}
+    plumbing: list[str] = []
     if proc.stdout is not None:
         for line in proc.stdout:
             t = _classify_line(line, state)
+            if t == "meta":
+                # CLI chrome: kept for the session facts it carries, never streamed.
+                plumbing.append(line)
+                continue
             if t == "skip":
                 continue
             _broadcast(session_id,
                        {"event": "chunk", "type": t, "delta": line.rstrip("\n") + "\n"})
     proc.wait()
+    meta = parse_cli_plumbing(plumbing)
+    if meta:
+        _broadcast(session_id, {"event": _SESSION_META_EVENT, **meta})
     _broadcast(session_id, {"event": "done"})
     _send_chat_reply_push(session_id)
 
@@ -1911,13 +2051,12 @@ TASK_REGISTRY = {
 
 def _extract_answer(stdout: str) -> str:
     """Extract clean answer text from hermes chat -q stdout."""
-    clean = re.sub(r"\x1b\[[0-9;]*[a-zA-Z]", "", stdout)
+    clean = _ANSI_RE.sub("", stdout)
     boxes = re.findall(r"╭─[^\n]+╮\n(.*?)\n╰─[^\n]+╯", clean, re.DOTALL)
     if boxes:
-        return boxes[-1].strip()
-    clean = re.sub(r"^Query:.*?\nInitializing agent\.\.\.\s*", "", clean, flags=re.DOTALL)
-    clean = re.sub(r"Resume this session with:.*$", "", clean, flags=re.DOTALL)
-    return clean.strip()
+        return strip_cli_plumbing(boxes[-1])
+    clean = re.sub(r"^Query:.*?Initializing agent\.\.\.\s*", "", clean, flags=re.DOTALL)
+    return strip_cli_plumbing(clean)
 
 
 @app.get("/api/v1/tasker/tasks")
@@ -2859,8 +2998,8 @@ _EVENTS: list[dict] = []
 _EVENTS_LOCK = threading.Lock()
 _EVENT_LIMIT = 200
 _EVENTS_CHANNEL = "mercury:events"
-_NOTIFY_KINDS = ("ready", "needs_you", "working", "info")
-_PUSHED_KINDS = ("ready", "needs_you", "info")
+_NOTIFY_KINDS = ("ready", "needs_you", "working", "merged", "info")
+_PUSHED_KINDS = ("ready", "needs_you", "merged", "info")
 _LOOPBACK = {"127.0.0.1", "::1"}  # /internal/notify callers: Hermes on this host only
 
 _PLAN_SYSTEM = (
@@ -2950,6 +3089,7 @@ def _board_tasks(project: dict) -> list[dict]:
             "coder": state.get("coder") or project.get("coder"),
             "branch": r["branch_name"],
             "blockedReason": state.get("blockedReason") or r["last_failure_error"],
+            "mergedAt": _iso(state.get("mergedAt")),
             "createdAt": _iso(r["created_at"]),
             "updatedAt": _iso(state.get("updatedAt") or r["completed_at"] or r["started_at"] or r["created_at"]),
         })
@@ -3023,6 +3163,36 @@ def github_repos():
             for r in _REPOS_CACHE["data"]]
 
 
+@app.get("/api/v1/tunnel")
+def tunnel():
+    """The Cloudflare tunnel reaching this bridge, if there is one (read-only).
+
+    Starting or stopping it is Hermes' job (`mercury_tunnel.py up|down`), not the
+    bridge's: this only reports what that script left in ~/.hermes/mercury, so a
+    connected app can show the URL to copy to a phone that is off the LAN.
+    """
+    state = {}
+    try:
+        state = json.loads((MERCURY_DIR / "tunnel.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        state = {}
+    pid = int(state.get("pid") or 0)
+    # Liveness by reading /proc, not by signalling: the bridge relays, it does not
+    # manage processes (a test enforces that — see test_projects.py).
+    alive = False
+    if pid > 0:
+        try:
+            alive = "cloudflared" in Path(f"/proc/{pid}/cmdline").read_bytes().decode(errors="ignore")
+        except OSError:
+            alive = False
+    return {"up": alive, "kind": state.get("kind") if alive else None,
+            "url": state.get("url") if alive else None,
+            "hostname": state.get("hostname") if alive else None,
+            "port": state.get("port"), "startedAt": _iso(state.get("startedAt")) if alive else None,
+            "accessProtected": bool(state.get("accessProtected")) if alive else False,
+            "how": "ask Hermes to start it: [Mercury: tunnel] {\"action\": \"up\"}"}
+
+
 @app.get("/api/v1/agents")
 def agents():
     script = MERCURY_BIN / "mercury_resources.py"
@@ -3064,11 +3234,36 @@ def orchestrator():
 
 # What the app may ask Hermes to do. The text is what Hermes sees; the
 # mercury-orchestrator / issue-planner skills say how to act on each one.
+# `edit_task` goes to the orchestrator (it owns the board); `file_issue` and
+# `followup_issue` go to the project agent (it owns the repo and its memory).
 _INTENTS = {
     "link_repo": "link repo", "set_project": "set project", "unlink": "unlink",
     "retry_task": "retry task", "cancel_task": "cancel task", "pause": "pause", "resume": "resume",
-    "file_issue": "file issue",
+    "file_issue": "file issue", "edit_task": "edit task", "followup_issue": "follow-up issue",
+    "tunnel": "tunnel",
 }
+_PROJECT_INTENTS = ("file_issue", "followup_issue")
+
+
+def _project_session(project: dict, session_id: str | None = None) -> tuple[str, str]:
+    """The project chat an intent lands in: the app's session, the newest one, or a new one.
+
+    A suggestion about a task belongs in the project's own chat, so the agent has
+    the repo, its memory and the issue in front of it.
+    """
+    profile = project["profile"]
+    if session_id and _session_title(session_id, profile) is not None:
+        return session_id, profile
+    existing = _list_sessions([profile])
+    if existing:
+        return existing[0]["id"], profile
+    if not (HERMES_API.serves(profile) and HERMES_API.available()):
+        raise HTTPException(status_code=503, detail="the Hermes API server does not serve this project")
+    try:
+        sid = HERMES_API.create_session(title=f"{project['name']} · Mercury", profile=profile)
+    except HermesApiError as e:
+        raise HTTPException(status_code=502, detail=f"could not start the project chat: {e}")
+    return sid, profile
 
 
 @app.post("/api/v1/hermes/intent")
@@ -3079,14 +3274,20 @@ def hermes_intent(body: dict):
     payload = body.get("payload") or {}
     if not isinstance(payload, dict):
         raise HTTPException(status_code=400, detail="payload must be an object")
-    if kind == "file_issue":
-        # goes to the project agent's Plan chat: it drafted the issue, it files it
+    if kind in _PROJECT_INTENTS:
+        # goes to the project agent: it owns the repo, the plan chat and its memory
         project = _project_or_404(body.get("project") or "")
-        sid, profile = body.get("sessionId") or "", project["profile"]
-        if not sid:
-            raise HTTPException(status_code=400, detail="file_issue needs the Plan chat's sessionId")
-        text = f"[Mercury Plan · project {project['id']} · {project['repo']}]\n[Mercury: file issue] " \
-               + json.dumps(payload.get("draft") or payload)
+        if kind == "file_issue":
+            sid, profile = body.get("sessionId") or "", project["profile"]
+            if not sid:
+                raise HTTPException(status_code=400, detail="file_issue needs the Plan chat's sessionId")
+            text = f"[Mercury Plan · project {project['id']} · {project['repo']}]\n[Mercury: file issue] " \
+                   + json.dumps(payload.get("draft") or payload)
+        else:
+            # a suggestion about work that already shipped: a follow-up issue
+            sid, profile = _project_session(project, body.get("sessionId"))
+            text = f"[Mercury: {_INTENTS[kind]}] " + json.dumps(
+                {"project": project["id"], "repo": project["repo"], **payload})
     else:
         if body.get("project"):
             payload = {"project": body["project"], **payload}

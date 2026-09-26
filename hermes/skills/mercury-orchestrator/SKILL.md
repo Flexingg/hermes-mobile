@@ -45,7 +45,28 @@ or two sentences:
   (or `reassign`), and say what you changed.
 - `[Mercury: cancel task] {"project": "...", "task": "..."}` → `hermes kanban --board <id> archive <task>`
   if not running; if running, `hermes kanban --board <id> reclaim <task>` first.
+- `[Mercury: edit task] {"project": "...", "task": "...", "note": "what the user wants changed",
+  "issue": N, "pr": N, "phase": "review|merged|..."}` — the user tapped into a task in the app and
+  suggested an edit. Read the task and its PR first:
+  - **PR still open** (`gh pr view <pr> -R <repo>` says OPEN) → put the suggestion on the task and
+    send it back to its worker, which publishes to the same PR:
+    `hermes kanban --board <id> comment <task> "<the user's note, verbatim>"` then
+    `hermes kanban --board <id> reopen-review <task>`. Don't write the code yourself.
+  - **PR merged or closed** → the branch is gone, so this is new work. Hand it to the project agent as
+    a follow-up issue (see below) and say that's what you did.
+  - **Task not in review** (queued/working) → append the note as a comment and say it will be picked
+    up on the current run.
 - `[Mercury: pause]` / `[Mercury: resume]` → `hermes pause` / `hermes resume`.
+- `[Mercury: tunnel] {"action": "up|down|status", "hostname": "...", "port": 9130}` → the user wants
+  to reach the bridge from outside their network without Tailscale:
+  `python3 $B/mercury_tunnel.py up [--hostname H]` / `down` / `status`.
+  - **Quote the whole URL back** (`https://….trycloudflare.com`, or the named hostname) — that is the
+    only thing the user needs, and it is the only place it is visible.
+  - A quick tunnel is free and needs no account, but its URL changes every start and Cloudflare does
+    not authenticate anyone on it (the bridge token still gates the API). Say so, and mention
+    `--hostname` + Cloudflare Access as the lasting option.
+  - `down` stops exactly the process the state file names. If `up` says one is already running, report
+    the existing URL instead of starting a second one.
 
 ## Plain questions
 
@@ -63,4 +84,6 @@ or two sentences:
 
 - `mercury-intake` queues issues labelled `mercury` on GitHub.
 - `mercury-ci` follows PRs: CI green → APK + "ready for testing"; red → back to the worker once.
+  **A merged PR closes its task by itself** (task → done, phone push, worktree and branch cleaned).
+  A PR closed without merging is recorded and reported too, and the task ends there — no push to reopen it.
 - `mercury-resources` enforces the RAM floor.

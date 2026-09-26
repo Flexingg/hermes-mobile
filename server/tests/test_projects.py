@@ -177,6 +177,76 @@ def test_unknown_intents_are_refused(client, api):
     assert client.post("/api/v1/hermes/intent", json={"kind": "rm_rf"}, headers=auth()).status_code == 400
 
 
+def test_edit_task_goes_to_the_orchestrator_with_the_note(client, api):
+    """A suggestion about a task is the orchestrator's call: it owns the board."""
+    r = client.post("/api/v1/hermes/intent", json={
+        "kind": "edit_task", "project": "lumen-launcher",
+        "payload": {"task": "t_abc", "note": "keep the header pinned", "phase": "review",
+                    "issue": 42, "pr": 9}}, headers=auth())
+    assert r.status_code == 200, r.text
+    path, body = api.requests[-1][1], api.requests[-1][2]
+    assert path == "/api/sessions/" + bridge._orchestrator_session() + "/chat"
+    assert body["message"].startswith('[Mercury: edit task] {"project": "lumen-launcher"')
+    assert '"note": "keep the header pinned"' in body["message"]
+    assert '"pr": 9' in body["message"]
+
+
+def test_followup_issue_goes_to_the_project_agent(client, api, tmp_path, monkeypatch):
+    """New work after a merge belongs to the project agent, which owns the repo."""
+    monkeypatch.setattr(bridge, "PROFILES_DIR", tmp_path / "profiles")
+    db = tmp_path / "profiles" / "dev-lumen-launcher" / "state.db"
+    db.parent.mkdir(parents=True, exist_ok=True)
+    con = _make_full_db(db)
+    con.execute("INSERT INTO sessions (id, source, title) VALUES ('plan1','api_server','plan')")
+    con.commit()
+    con.close()
+    r = client.post("/api/v1/hermes/intent", json={
+        "kind": "followup_issue", "project": "lumen-launcher", "sessionId": "plan1",
+        "payload": {"task": "t_abc", "note": "the card should keep the streak", "issue": 42, "pr": 9}},
+        headers=auth())
+    assert r.status_code == 200, r.text
+    path, body = api.requests[-1][1], api.requests[-1][2]
+    assert path == "/p/dev-lumen-launcher/api/sessions/plan1/chat"
+    assert body["message"].startswith("[Mercury: follow-up issue] ")
+    assert '"repo": "Flexingg/lumen-launcher"' in body["message"]
+    assert "keep the streak" in body["message"]
+
+
+def test_followup_without_a_session_opens_one(client, api):
+    """No sessionId: the project's newest chat is used, or one is started."""
+    r = client.post("/api/v1/hermes/intent", json={
+        "kind": "followup_issue", "project": "lumen-launcher",
+        "payload": {"task": "t_abc", "note": "smaller heading"}}, headers=auth())
+    assert r.status_code == 200, r.text
+    assert api.requests[-1][1].startswith("/p/dev-lumen-launcher/api/sessions/")
+
+
+# -- the tunnel the server runs, as the app sees it ---------------------------------
+def test_tunnel_is_reported_when_the_state_file_names_a_live_cloudflared(client, mercury, monkeypatch):
+    """Liveness is a /proc read: the bridge must not signal processes itself."""
+    monkeypatch.setattr(Path, "read_bytes", lambda self: b"/home/x/.local/bin/cloudflared\x00tunnel\x00--url\x00")
+    (mercury / "tunnel.json").write_text(json.dumps(
+        {"kind": "quick", "url": "https://abc-def.trycloudflare.com", "pid": 4242,
+         "port": 9130, "startedAt": time.time(), "accessProtected": False}))
+    d = client.get("/api/v1/tunnel", headers=auth()).json()
+    assert d["up"] is True and d["url"] == "https://abc-def.trycloudflare.com"
+    assert d["kind"] == "quick" and d["port"] == 9130
+    assert "[Mercury: tunnel]" in d["how"]
+
+
+def test_no_tunnel_stale_pid_or_wrong_process_reads_as_down(client, mercury):
+    assert client.get("/api/v1/tunnel", headers=auth()).json()["up"] is False
+    (mercury / "tunnel.json").write_text(json.dumps({"url": "https://old.trycloudflare.com", "pid": 999999}))
+    d = client.get("/api/v1/tunnel", headers=auth()).json()
+    # A dead pid, or a pid that is not cloudflared, must not be advertised as a
+    # working tunnel: the app would send the user to a URL that goes nowhere.
+    assert d["up"] is False and d["url"] is None
+
+
+def test_tunnel_endpoint_needs_the_token(client):
+    assert client.get("/api/v1/tunnel").status_code == 401
+
+
 def test_file_issue_goes_to_the_projects_plan_chat(client, api):
     draft = {"title": "Add fasting card", "body": "b", "acceptance": ["x"]}
     r = client.post("/api/v1/hermes/intent", json={"kind": "file_issue", "project": "lumen-launcher",

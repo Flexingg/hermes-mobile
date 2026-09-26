@@ -58,3 +58,22 @@ tapped **Create issue**. File exactly that draft (it may have been edited):
 
 Reply with the issue link and "queued". Filing twice is safe: the script returns the
 same issue. If it fails, say exactly what the error was.
+
+## Follow-ups (`[Mercury: follow-up issue]`)
+
+A message like
+
+    [Mercury: follow-up issue] {"project": "lumen-launcher", "repo": "Flexingg/lumen-launcher",
+                                "task": "t_ab12", "issue": 42, "pr": 9, "note": "the card should ..."}
+
+means the user tapped into a **finished** task in the app (this one already merged, so its branch
+is gone) and suggested a change. Turn that note into one new issue:
+
+1. Read what shipped: `gh pr view <pr> -R <repo>`, `gh issue view <issue> -R <repo>`, and the code
+   the note points at.
+2. Check for duplicates first: `gh issue list -R <repo> --search "<words>"`.
+3. Write the draft to a file and file it, exactly as in **Filing** above — the body must say it
+   follows <repo>#<issue> and PR <pr>.
+4. Reply with the new issue link and that it is queued. If the note is too vague to scope, ask one
+   question instead of guessing.
+

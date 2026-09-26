@@ -218,13 +218,17 @@ class _WorkTab extends StatelessWidget {
                     textAlign: TextAlign.center, style: TextStyle(color: scheme.onSurfaceVariant)),
               ]),
             ),
-          ...active.map((t) => TaskCard(project: project, task: t)),
+          ...active.map((t) => Padding(
+                padding: const EdgeInsets.only(bottom: 8),
+                child: TaskCard(project: project, task: t))),
           if (done.isNotEmpty) ...[
             Padding(
               padding: const EdgeInsets.fromLTRB(8, 16, 8, 4),
               child: Text('Earlier', style: TextStyle(color: scheme.onSurfaceVariant, fontWeight: FontWeight.w600)),
             ),
-            ...done.map((t) => TaskCard(project: project, task: t)),
+            ...done.map((t) => Padding(
+                  padding: const EdgeInsets.only(bottom: 8),
+                  child: TaskCard(project: project, task: t))),
           ],
         ],
       ),

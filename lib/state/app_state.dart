@@ -160,11 +160,23 @@ class AppState extends ChangeNotifier {
       return;
     }
     final token = await config.serverToken;
+    final access = await config.serverAccessToken;
     repo = HermesRepository(
       baseUrl: config.serverBaseUrl!,
       token: token,
+      accessClientId: access?.id,
+      accessClientSecret: access?.secret,
     );
     await _connect();
+  }
+
+  /// The tunnel the server has open, if any (null when it can't be reached).
+  Future<TunnelStatus?> tunnel() async {
+    try {
+      return await repo.tunnelStatus();
+    } catch (e) {
+      return null;
+    }
   }
 
   /// Validate + connect to a server, persisting it, then load real data.
@@ -172,9 +184,23 @@ class AppState extends ChangeNotifier {
     required String name,
     required String baseUrl,
     required String token,
+    ConnectionKind kind = ConnectionKind.lan,
+    String? accessClientId,
+    String? accessClientSecret,
   }) async {
-    await config.setServer(name: name, baseUrl: baseUrl, token: token);
-    repo = HermesRepository(baseUrl: baseUrl, token: token);
+    await config.setServer(
+        name: name,
+        baseUrl: baseUrl,
+        token: token,
+        kind: kind,
+        accessClientId: accessClientId,
+        accessClientSecret: accessClientSecret);
+    repo = HermesRepository(
+      baseUrl: baseUrl,
+      token: token,
+      accessClientId: accessClientId,
+      accessClientSecret: accessClientSecret,
+    );
     await _connect();
   }
 
@@ -824,6 +850,28 @@ class AppState extends ChangeNotifier {
 
   Future<String?> cancelTask(String project, String task) =>
       _intent('task:$task', 'cancel_task', project: project, payload: {'task': task});
+
+  /// "Suggest edits" on a task: Hermes puts the note back on the task's worker
+  /// (same branch, same PR) — or, when the PR is already merged, hands it to the
+  /// project agent as new work. Which one is Hermes' call, not the app's.
+  Future<String?> suggestEdit(String projectId, ProjectTask task, String note) =>
+      _intent('edit:${task.id}', 'edit_task', project: projectId, payload: {
+        'task': task.id,
+        'note': note,
+        'phase': task.phase.wire,
+        'issue': ?task.issue,
+        'pr': ?task.prNumber,
+      });
+
+  /// "File follow-up issue" on a finished task: the project agent that owns the
+  /// repo scopes and files it, so it lands queued like any other issue.
+  Future<String?> followupIssue(String projectId, ProjectTask task, String note) =>
+      _intent('followup:${task.id}', 'followup_issue', project: projectId, payload: {
+        'task': task.id,
+        'note': note,
+        'issue': ?task.issue,
+        'pr': ?task.prNumber,
+      });
 
   Future<String?> pauseAll() => _intent('pause', 'pause');
   Future<String?> resumeAll() => _intent('resume', 'resume');

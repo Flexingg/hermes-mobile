@@ -14,7 +14,11 @@ class MessageComposer extends StatefulWidget {
 
   /// Placeholder text (e.g. Plan mode asks for the change you want).
   final String? hint;
-  const MessageComposer({super.key, this.enabled = true, this.onSend, this.hint});
+
+  /// Pre-filled text the user edits before sending (e.g. a task the chat was
+  /// opened from). Never sent on its own.
+  final String? initialText;
+  const MessageComposer({super.key, this.enabled = true, this.onSend, this.hint, this.initialText});
 
   @override
   State<MessageComposer> createState() => _MessageComposerState();
@@ -32,6 +36,17 @@ class _MessageComposerState extends State<MessageComposer> {
   void initState() {
     super.initState();
     _voiceInput.addListener(_onVoiceChanged);
+    // Pre-filled text the user edits before sending (a task the chat was opened
+    // from). Never sent on its own.
+    final seed = widget.initialText;
+    if (seed != null && seed.isNotEmpty) {
+      _controller.text = seed;
+      // Land the cursor at the end so typing continues the sentence.
+      _controller.selection = TextSelection.collapsed(offset: seed.length);
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) _focus.requestFocus();
+      });
+    }
   }
 
   void _onVoiceChanged() {

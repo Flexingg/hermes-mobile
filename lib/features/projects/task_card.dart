@@ -6,6 +6,7 @@ import '../../core/util/format.dart';
 import '../../data/project_models.dart';
 import '../../state/app_state.dart';
 import 'project_widgets.dart';
+import 'task_detail_page.dart';
 
 /// One issue's way through the pipeline: issue -> task -> PR -> CI -> test build.
 class TaskCard extends StatefulWidget {
@@ -52,80 +53,94 @@ class _TaskCardState extends State<TaskCard> {
     final state = context.watch<AppState>();
     final scheme = Theme.of(context).colorScheme;
     final pending = state.intentPending('task:${t.id}');
+    final finished = t.phase.isFinished;
     final meta = [
       if (t.issue != null) 'Issue #${t.issue}',
       if (t.prNumber != null) 'PR #${t.prNumber}',
       coderName(t.coder),
-      if (t.updatedAt != null) formatRelativeTime(t.updatedAt!),
+      if (t.mergedAt != null)
+        'merged ${formatRelativeTime(t.mergedAt!)}'
+      else if (t.updatedAt != null)
+        formatRelativeTime(t.updatedAt!),
     ];
     return Card(
       elevation: 0,
+      margin: EdgeInsets.zero,
       color: scheme.surfaceContainerLow,
       shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
-      child: Padding(
-        padding: const EdgeInsets.fromLTRB(14, 12, 14, 8),
-        child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-          Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
-            Expanded(
-              child: Text(t.title,
-                  style: const TextStyle(fontSize: 15, fontWeight: FontWeight.w600)),
-            ),
-            const SizedBox(width: 8),
-            TaskPhaseChip(t.phase, dense: true),
-          ]),
-          const SizedBox(height: 4),
-          Text(meta.join(' · '), style: TextStyle(fontSize: 12, color: scheme.onSurfaceVariant)),
-          if (t.ci != null && t.prNumber != null) ...[
-            const SizedBox(height: 6),
-            _CiLine(ci: t.ci!, failing: t.failingChecks),
-          ],
-          if (t.phase == TaskPhase.needsYou && (t.blockedReason ?? '').isNotEmpty) ...[
-            const SizedBox(height: 8),
-            Container(
-              width: double.infinity,
-              padding: const EdgeInsets.all(10),
-              decoration: BoxDecoration(
-                  color: scheme.errorContainer.withValues(alpha: 0.5), borderRadius: BorderRadius.circular(12)),
-              child: Text(t.blockedReason!, style: TextStyle(fontSize: 13, color: scheme.onErrorContainer)),
-            ),
-          ],
-          const SizedBox(height: 4),
-          Wrap(spacing: 4, children: [
-            if (t.apk != null)
-              FilledButton.icon(
-                key: Key('install-${t.id}'),
-                onPressed: _downloading ? null : _installApk,
-                icon: _downloading
-                    ? const SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2))
-                    : const Icon(Icons.install_mobile, size: 18),
-                label: Text(_downloading ? 'Downloading…' : 'Install test build'),
+      clipBehavior: Clip.antiAlias,
+      child: InkWell(
+        // Open the task: everything about it, and the three things you can do
+        // with it (suggest edits, follow-up issue, talk to the agent).
+        key: Key('open-${t.id}'),
+        onTap: () => Navigator.of(context).push(MaterialPageRoute(
+            builder: (_) => TaskDetailPage(project: widget.project, task: t))),
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(14, 12, 14, 8),
+          child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+            Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+              Expanded(
+                child: Text(t.title,
+                    style: const TextStyle(fontSize: 15, fontWeight: FontWeight.w600)),
               ),
-            if (t.prUrl != null)
-              TextButton.icon(
-                  onPressed: () => _open(t.prUrl),
-                  icon: const Icon(Icons.open_in_new, size: 18),
-                  label: const Text('Open PR')),
-            if (t.prUrl == null && t.issueUrl != null)
-              TextButton.icon(
-                  onPressed: () => _open(t.issueUrl),
-                  icon: const Icon(Icons.open_in_new, size: 18),
-                  label: const Text('Issue')),
-            if (t.canRetry)
-              TextButton.icon(
-                  onPressed: pending
-                      ? null
-                      : () => _ask(() => state.retryTask(widget.project.id, t.id), 'Retry'),
-                  icon: const Icon(Icons.replay, size: 18),
-                  label: Text(pending ? 'Asking Hermes…' : 'Retry')),
-            if (t.canCancel)
-              TextButton.icon(
-                  onPressed: pending
-                      ? null
-                      : () => _ask(() => state.cancelTask(widget.project.id, t.id), 'Cancel'),
-                  icon: const Icon(Icons.close, size: 18),
-                  label: Text(pending ? 'Asking Hermes…' : 'Cancel')),
+              const SizedBox(width: 8),
+              TaskPhaseChip(t.phase, dense: true),
+              Icon(Icons.chevron_right, size: 18, color: scheme.onSurfaceVariant),
+            ]),
+            const SizedBox(height: 4),
+            Text(meta.join(' · '), style: TextStyle(fontSize: 12, color: scheme.onSurfaceVariant)),
+            if (t.ci != null && t.prNumber != null && !finished) ...[
+              const SizedBox(height: 6),
+              _CiLine(ci: t.ci!, failing: t.failingChecks),
+            ],
+            if (t.phase == TaskPhase.needsYou && (t.blockedReason ?? '').isNotEmpty) ...[
+              const SizedBox(height: 8),
+              Container(
+                width: double.infinity,
+                padding: const EdgeInsets.all(10),
+                decoration: BoxDecoration(
+                    color: scheme.errorContainer.withValues(alpha: 0.5), borderRadius: BorderRadius.circular(12)),
+                child: Text(t.blockedReason!, style: TextStyle(fontSize: 13, color: scheme.onErrorContainer)),
+              ),
+            ],
+            const SizedBox(height: 4),
+            Wrap(spacing: 4, children: [
+              if (t.apk != null && !finished)
+                FilledButton.icon(
+                  key: Key('install-${t.id}'),
+                  onPressed: _downloading ? null : _installApk,
+                  icon: _downloading
+                      ? const SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2))
+                      : const Icon(Icons.install_mobile, size: 18),
+                  label: Text(_downloading ? 'Downloading…' : 'Install test build'),
+                ),
+              if (t.prUrl != null)
+                TextButton.icon(
+                    onPressed: () => _open(t.prUrl),
+                    icon: const Icon(Icons.open_in_new, size: 18),
+                    label: const Text('Open PR')),
+              if (t.prUrl == null && t.issueUrl != null)
+                TextButton.icon(
+                    onPressed: () => _open(t.issueUrl),
+                    icon: const Icon(Icons.open_in_new, size: 18),
+                    label: const Text('Issue')),
+              if (t.canRetry)
+                TextButton.icon(
+                    onPressed: pending
+                        ? null
+                        : () => _ask(() => state.retryTask(widget.project.id, t.id), 'Retry'),
+                    icon: const Icon(Icons.replay, size: 18),
+                    label: Text(pending ? 'Asking Hermes…' : 'Retry')),
+              if (t.canCancel)
+                TextButton.icon(
+                    onPressed: pending
+                        ? null
+                        : () => _ask(() => state.cancelTask(widget.project.id, t.id), 'Cancel'),
+                    icon: const Icon(Icons.close, size: 18),
+                    label: Text(pending ? 'Asking Hermes…' : 'Cancel')),
+            ]),
           ]),
-        ]),
+        ),
       ),
     );
   }
