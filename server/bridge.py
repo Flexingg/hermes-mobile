@@ -42,6 +42,11 @@ from fastapi.middleware.cors import CORSMiddleware
 from starlette.requests import Request
 from starlette.responses import FileResponse, JSONResponse, Response
 
+try:  # run as `python server/bridge.py` (the systemd unit) or with server/ on sys.path (tests)
+    from hermes_api import HermesApi, HermesApiError
+except ImportError:  # `uvicorn server.bridge:app` from the repo root
+    from server.hermes_api import HermesApi, HermesApiError
+
 HERMES = Path(os.environ.get("HERMES_HOME", str(Path.home() / ".hermes")))
 STATE_DB = HERMES / "state.db"
 CONFIG_YAML = HERMES / "config.yaml"
@@ -97,6 +102,9 @@ CORS_ORIGINS = [
 ]
 # Absolute path to the `hermes` CLI (systemd services don't inherit ~/.local/bin).
 HERMES_BIN = os.environ.get("HERMES_BIN", "/home/hermes/.local/bin/hermes")
+# The resident gateway's API server. Chat turns for the profiles it serves go
+# through it; everything else (and any turn it can't take) uses HERMES_BIN.
+HERMES_API = HermesApi(HERMES)
 # Firebase service-account JSON for FCM push (server-side). Optional.
 FCM_SERVICE_ACCOUNT = os.environ.get(
     "FCM_SERVICE_ACCOUNT", "/home/hermes/.hermes/secrets/mercury-fcm-service-account.json"
@@ -369,6 +377,9 @@ def status():
         "disk": psutil.disk_usage(str(HERMES)).percent,
         "uptime": f"{d}d {h}h {rem // 60}m",
         "gatewayUp": _gateway_up(),
+        # True when chat turns go through the resident gateway's API server
+        # rather than a `hermes chat` process per message.
+        "hermesApi": HERMES_API.available(),
         "activeSessions": n,
         "version": version,
         "fetchedAt": _iso(_now()),
@@ -407,7 +418,9 @@ def sessions():
                 "unreadCount": 0,
                 "pinned": bool(r["pinned"]),
                 "starred": False,
-                "profileId": r["source"] or "hermes",
+                # Sessions started through the API server are the default
+                # profile's; show them under the same bot as CLI-started ones.
+                "profileId": ("hermes" if r["source"] == "api_server" else r["source"]) or "hermes",
                 "color": _hash_color(r["id"]),
             }
         )
@@ -663,6 +676,19 @@ def create_session(body: dict):
     }
 
 
+def _session_title(session_id: str) -> str | None:
+    """The title Hermes gave a session (auto-titling may not have run yet)."""
+    try:
+        con = _db()
+        try:
+            row = con.execute("SELECT title FROM sessions WHERE id=?", (session_id,)).fetchone()
+        finally:
+            con.close()
+    except sqlite3.Error:
+        return None
+    return (row["title"] or None) if row else None
+
+
 @app.post("/api/v1/chat/start")
 def chat_start(body: dict):
     """Start a REAL new Hermes conversation: runs `hermes chat -q <text>` (which
@@ -671,6 +697,31 @@ def chat_start(body: dict):
     if not text:
         raise HTTPException(status_code=400, detail="text required")
     profile = (body.get("profile") or body.get("profileId") or _chat_profile() or "").strip() or None
+    if HERMES_API.serves(profile) and HERMES_API.available():
+        try:
+            sid = HERMES_API.create_session(title=body.get("name") or None)
+        except HermesApiError as e:
+            print(f"[bridge] API server could not create a session ({e}); using the CLI", flush=True)
+        else:
+            # The session exists now, so a failure from here on is reported
+            # rather than retried through the CLI (that would start a second chat).
+            try:
+                # same limit the CLI path has always had for a first turn
+                result = HERMES_API.chat(sid, text, timeout=180)
+            except HermesApiError as e:
+                raise HTTPException(status_code=502, detail=f"hermes failed: {e}")
+            title = (_session_title(result["session_id"]) or body.get("name") or text)[:200]
+            return {
+                "id": result["session_id"],
+                "title": title,
+                "lastPreview": text[:140],
+                "lastTimestamp": _iso(_now()),
+                "unreadCount": 0,
+                "pinned": False,
+                "starred": False,
+                "profileId": profile or "hermes",
+                "color": _hash_color(result["session_id"]),
+            }
     cmd = [HERMES_BIN, "chat", "-q", text, "--pass-session-id"]
     if profile:
         cmd += ["-p", profile]
@@ -736,32 +787,54 @@ def _spawn_hermes(
     prof = (profile or _chat_profile() or "").strip() or None
 
     def run():
-        cmd = [HERMES_BIN, "chat", "-q", query, "--resume", session_id]
-        if img_path:
-            cmd += ["--image", img_path]
-        if prof:
-            cmd += ["-p", prof]
-        # start_new_session: run hermes in its own process group/session so
-        # stray SIGHUP/SIGTERM sent to the bridge's group can't interrupt the
-        # in-flight model call. stdin=/dev/null: no inherited terminal.
-        proc = subprocess.Popen(
-            cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
-            stdin=subprocess.DEVNULL, start_new_session=True,
-        )
-        state = {"thinking": False}
-        if proc.stdout is not None:
-            for line in proc.stdout:
-                t = _classify_line(line, state)
-                if t == "skip":
-                    continue
-                _broadcast(session_id,
-                           {"event": "chunk", "type": t, "delta": line.rstrip("\n") + "\n"})
-        proc.wait()
-        _broadcast(session_id, {"event": "done"})
-        _send_chat_reply_push(session_id)
+        # Images still need the CLI's --image; everything else goes to the
+        # resident gateway when it serves this profile.
+        if img_path is None and HERMES_API.serves(prof) and HERMES_API.available():
+            try:
+                HERMES_API.stream_chat(session_id, query, lambda c: _broadcast(session_id, c))
+                _broadcast(session_id, {"event": "done"})
+                _send_chat_reply_push(session_id)
+                return
+            except HermesApiError as e:
+                if e.started:
+                    # Part of the reply is already on screen: running the turn
+                    # again through the CLI would answer twice. Say what broke.
+                    _broadcast(session_id, {"event": "chunk", "type": "technical",
+                                            "delta": f"⚠ {e}\n"})
+                    _broadcast(session_id, {"event": "done"})
+                    return
+                print(f"[bridge] API server did not take the turn ({e}); using the CLI", flush=True)
+        _run_hermes_cli(session_id, query, img_path, prof)
 
     t = threading.Thread(target=run, daemon=True)
     t.start()
+
+
+def _run_hermes_cli(session_id: str, query: str, img_path: str | None, prof: str | None) -> None:
+    """The original transport: one `hermes chat --resume` process per turn."""
+    cmd = [HERMES_BIN, "chat", "-q", query, "--resume", session_id]
+    if img_path:
+        cmd += ["--image", img_path]
+    if prof:
+        cmd += ["-p", prof]
+    # start_new_session: run hermes in its own process group/session so
+    # stray SIGHUP/SIGTERM sent to the bridge's group can't interrupt the
+    # in-flight model call. stdin=/dev/null: no inherited terminal.
+    proc = subprocess.Popen(
+        cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+        stdin=subprocess.DEVNULL, start_new_session=True,
+    )
+    state = {"thinking": False}
+    if proc.stdout is not None:
+        for line in proc.stdout:
+            t = _classify_line(line, state)
+            if t == "skip":
+                continue
+            _broadcast(session_id,
+                       {"event": "chunk", "type": t, "delta": line.rstrip("\n") + "\n"})
+    proc.wait()
+    _broadcast(session_id, {"event": "done"})
+    _send_chat_reply_push(session_id)
 
 
 @app.post("/api/v1/attachments")

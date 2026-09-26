@@ -43,4 +43,6 @@ def _isolated_stores(tmp_path, monkeypatch):
     monkeypatch.setattr(bridge, "STATE_DB", tmp_path / "state.db")
     monkeypatch.setattr(bridge, "SKILLS_DIR", tmp_path / "skills")
     monkeypatch.setattr(bridge, "PROFILES_DIR", tmp_path / "profiles")
+    # No key -> never "available": no test can reach a real Hermes API server.
+    monkeypatch.setattr(bridge, "HERMES_API", bridge.HermesApi(tmp_path, key=""))
     yield

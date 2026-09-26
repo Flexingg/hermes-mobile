@@ -15,6 +15,7 @@ PY = "/home/hermes/.hermes/hermes-agent/venv/bin/python3"
 FLUTTER = "/home/hermes/dev/flutter/bin/flutter"
 
 BRIDGE = REPO / "server" / "bridge.py"
+HERMES_API = REPO / "server" / "hermes_api.py"
 REPO_DART = REPO / "lib" / "data" / "hermes_repository.dart"
 STATE_DART = REPO / "lib" / "state" / "app_state.dart"
 
@@ -193,6 +194,69 @@ MUTATIONS = [
         "    final data = await _post('/api/v1/cron/$id/run');\n    _cronFromJson(data);\n  }",
         lambda: run_flutter("runCronJob tolerates", "test/repository_test.dart"),
         "runCronJob tolerates the bridge's {ok:true}",
+        True,
+    ),
+    (
+        "api transport: a half-streamed failure is retried through the CLI",
+        BRIDGE,
+        "                if e.started:\n",
+        "                if False:\n",
+        lambda: run_pytest("tests/test_hermes_api.py::test_failure_after_partial_reply_is_not_run_twice"),
+        "a failure after a partial reply is not run twice",
+        True,
+    ),
+    (
+        "api transport: every profile is sent to the default gateway",
+        HERMES_API,
+        '        return (profile or "").strip().lower() in _DEFAULT_PROFILE_NAMES\n',
+        "        return True\n",
+        lambda: run_pytest("tests/test_hermes_api.py::test_other_profiles_still_use_the_cli"),
+        "other profiles still use the CLI",
+        True,
+    ),
+    (
+        "api transport: image turns lose their image",
+        BRIDGE,
+        "        if img_path is None and HERMES_API.serves(prof) and HERMES_API.available():\n",
+        "        if HERMES_API.serves(prof) and HERMES_API.available():\n",
+        lambda: run_pytest("tests/test_hermes_api.py::test_image_turns_still_use_the_cli"),
+        "image turns still use the CLI",
+        True,
+    ),
+    (
+        "api transport: keyless client still calls the API server",
+        HERMES_API,
+        "        if not self.key:\n            return False\n",
+        "",
+        lambda: run_pytest("tests/test_hermes_api.py::test_no_key_means_not_available_without_any_request"),
+        "no key means not available, and no request is made",
+        True,
+    ),
+    (
+        "api transport: a cut-off stream counts as finished",
+        HERMES_API,
+        '            raise HermesApiError("stream ended before the run finished", started=started)\n',
+        "            return\n",
+        lambda: run_pytest("tests/test_hermes_api.py::test_stream_cut_off_without_done_is_an_error"),
+        "a stream cut off without done is an error",
+        True,
+    ),
+    (
+        "api transport: a malformed response kills the relay thread silently",
+        HERMES_API,
+        "_TRANSPORT_ERRORS = (OSError, http.client.HTTPException)\n",
+        "_TRANSPORT_ERRORS = (OSError,)\n",
+        lambda: run_pytest("tests/test_hermes_api.py::test_malformed_response_falls_back_instead_of_hanging"),
+        "a malformed response falls back instead of hanging",
+        True,
+    ),
+    (
+        "api transport: API-server sessions show up as an 'api_server' bot",
+        BRIDGE,
+        '("hermes" if r["source"] == "api_server" else r["source"])',
+        'r["source"]',
+        lambda: run_pytest("tests/test_hermes_api.py::test_api_server_sessions_are_listed_under_the_default_bot"),
+        "API-server sessions are listed under the default bot",
         True,
     ),
 ]
