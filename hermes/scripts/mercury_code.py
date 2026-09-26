@@ -28,7 +28,8 @@ CODE_TASK = HERMES_ROOT / "scripts" / "code_task.py"
 _SECRET_NAME = re.compile(r"(TOKEN|SECRET|PASSWORD|PASSWD|API_KEY|_KEY$|CREDENTIAL)", re.I)
 # Things a coder may leave in a worktree that must never be committed.
 NEVER_COMMIT = re.compile(r"(^|/)(data/(transactions|rules|config|categories|accounts|budgets|goals)\.json"
-                          r"|\.env(\..*)?|.*\.har|secrets?/.*|.*\.jks|.*\.keystore|key\.properties)$")
+                          r"|\.env(\..*)?|.*\.har|secrets?/.*|.*\.jks|.*\.keystore|key\.properties"
+                          r"|local\.properties)$")
 
 
 def coder_env() -> dict:

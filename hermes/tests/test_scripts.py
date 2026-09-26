@@ -96,6 +96,8 @@ def test_link_rejects_bad_input(env):
 @pytest.mark.parametrize("files,expected", [
     ({"pubspec.yaml": ""}, "flutter analyze && flutter test"),
     ({"gradlew": ""}, "./gradlew --no-daemon --max-workers=2 testDebugUnitTest"),
+    ({"gradlew": "", "app/src/main/AndroidManifest.xml": ""},   # an Android app: build the test APK too
+     "./gradlew --no-daemon --max-workers=2 testDebugUnitTest :app:assembleDebug"),
     ({"package.json": ""}, "npm test"),
     ({"pyproject.toml": "[tool.pytest.ini_options]\n", "tests/test_a.py": ""}, "python3 -m pytest -q"),
     ({"conftest.py": ""}, "python3 -m pytest -q"),
@@ -269,6 +271,8 @@ def test_failing_gates_are_reported(env, repo, coder):
 # -- mercury_ship.py -----------------------------------------------------------------
 @pytest.fixture
 def shipped(env, repo):
+    # the main clone's untracked machine config (an Android SDK path, plus a secret)
+    (repo["main"] / "local.properties").write_text("sdk.dir=/opt/android-sdk\nstorePassword=hunter2\n")
     env.project()
     env.root.joinpath("mercury", "hooks").mkdir(parents=True, exist_ok=True)
     hook = env.root / "mercury" / "hooks" / "pre-push"
@@ -319,7 +323,9 @@ def test_publish_stages_named_files_pushes_and_opens_the_pr(env, shipped):
     assert rc == 0, out
     pr_args = env.called("gh", "pr", "create")[0]["argv"]
     assert pr_args[pr_args.index("--title") + 1] == "Add a fasting card"  # no "#42 " prefix twice
-    assert out["committed"] == ["app.txt"] and set(out["notCommitted"]) == {"data/transactions.json", ".env"}
+    assert out["committed"] == ["app.txt"]
+    # never committed: data dumps, secrets, and the SDK-path file prepare carried over
+    assert set(out["notCommitted"]) == {"data/transactions.json", ".env", "local.properties"}
     assert git(shipped["origin"], "log", "-1", "--format=%s%n%b", "demo/t_abc-fix", env=e).splitlines()[0] \
         == "Add a fasting card (#42)"
     body = env.called("gh", "pr", "create")[0]["stdin"]
@@ -627,3 +633,58 @@ def test_link_sets_the_board_workdir(env, repo):
     env.respond("hermes", ["project", "show"], rc=1)
     assert env.run("mercury_project.py", "link", "Flexingg/demo")[0] == 0
     assert env.called("hermes", "kanban", "boards", "set-default-workdir", "demo", str(repo["main"]))
+
+
+def test_publish_keeps_the_apk_the_gates_built_during_this_task(env, shipped):
+    wt = shipped["wt"]
+    apk_dir = wt / "app" / "build" / "outputs" / "apk" / "debug"
+    apk_dir.mkdir(parents=True)
+    (apk_dir / "app-debug.apk").write_bytes(b"FRESH")
+    (wt / "app.txt").write_text("v2\n")
+    notes = env.tmp / "notes.md"
+    notes.write_text("x")
+    env.respond("gh", ["pr", "list"], "[]")
+    env.respond("gh", ["pr", "create"], "https://github.com/Flexingg/demo/pull/9\n")
+    rc, out = env.run("mercury_ship.py", "publish", "--project", "demo", "--task", "t_abc", "--worktree",
+                      str(wt), "--title", "t", "--notes", str(notes))
+    assert rc == 0, out
+    st = env.task_state("t_abc")
+    assert Path(out["testBuild"]).read_bytes() == b"FRESH"
+    assert st["localApk"] == out["testBuild"] and st["localApkSha"] == st["headSha"]
+
+
+def test_publish_ignores_an_apk_from_before_the_task(env, shipped):
+    wt = shipped["wt"]
+    apk = wt / "app" / "build" / "outputs" / "apk" / "debug" / "app-debug.apk"
+    apk.parent.mkdir(parents=True)
+    apk.write_bytes(b"STALE")
+    os.utime(apk, (1_000_000, 1_000_000))  # long before prepare ran
+    (wt / "app.txt").write_text("v2\n")
+    notes = env.tmp / "notes.md"
+    notes.write_text("x")
+    env.respond("gh", ["pr", "list"], "[]")
+    env.respond("gh", ["pr", "create"], "https://github.com/Flexingg/demo/pull/9\n")
+    rc, out = env.run("mercury_ship.py", "publish", "--project", "demo", "--task", "t_abc", "--worktree",
+                      str(wt), "--title", "t", "--notes", str(notes))
+    assert rc == 0 and out["testBuild"] is None
+
+
+@pytest.mark.parametrize("apk_sha,offered", [("sha1", True), ("older", False)])
+def test_ready_offers_the_local_build_only_for_the_same_commit(env, bridge, apk_sha, offered):
+    got, url = bridge
+    local = env.tmp / "local.apk"
+    local.write_bytes(b"LOCAL")
+    _review_task(env, localApk=str(local), localApkSha=apk_sha)
+    _pr_view(env, "sha1", "SUCCESS")
+    env.respond("gh", ["run", "list"], "[]")  # CI built nothing for this PR
+    p = subprocess.run([sys.executable, str(SCRIPTS / "mercury_ci.py"), "--apply"], capture_output=True, text=True,
+                       env=env.environ(MERCURY_BRIDGE_URL=url))
+    assert "ready: demo #42 PR #9" in p.stdout, p.stdout + p.stderr
+    assert got[0]["body"]["apk"] == (str(local) if offered else None)
+
+
+def test_prepare_carries_only_the_sdk_path_into_the_worktree(env, shipped):
+    """local.properties is untracked, so a fresh worktree lacks it and Gradle can't
+    find the SDK (lumen). Only the SDK line may cross over."""
+    text = (shipped["wt"] / "local.properties").read_text()
+    assert text == "sdk.dir=/opt/android-sdk\n"

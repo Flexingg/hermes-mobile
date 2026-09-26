@@ -34,8 +34,10 @@ def detect_gates(path: Path) -> str:
     if (path / "pubspec.yaml").exists():
         return "flutter analyze && flutter test"
     if (path / "gradlew").exists():
-        # capped workers: this box has ~4 GB free and runs other jobs
-        return "./gradlew --no-daemon --max-workers=2 testDebugUnitTest"
+        # capped workers: this box shares its RAM with other jobs. An Android
+        # app module also builds the debug APK: it's the PR's test build.
+        apk = " :app:assembleDebug" if (path / "app" / "src" / "main" / "AndroidManifest.xml").exists() else ""
+        return f"./gradlew --no-daemon --max-workers=2 testDebugUnitTest{apk}"
     if (path / "package.json").exists():
         return "npm test"
     if (path / "pytest.ini").exists() or (path / "conftest.py").exists() or \

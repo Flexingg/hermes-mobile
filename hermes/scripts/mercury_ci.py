@@ -90,6 +90,8 @@ def follow(state: dict, apply: bool) -> str | None:
         if not apply:
             return f"would mark ready: {label} (CI {ci})"
         apk = fetch_apk(project, head, pr) if ci == "green" else None
+        if apk is None and state.get("localApkSha") == head:
+            apk = state.get("localApk")  # built by the gates on this machine, same commit
         update_task_state(task, ci=ci, headSha=head, apk=apk, phase="ready")
         r = notify("ready", project["id"], f"{project['name']} #{state.get('issue')} ready for testing",
                    view.get("title", ""), task=task, url=view.get("url"), apk=apk)

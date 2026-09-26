@@ -16,6 +16,8 @@ from __future__ import annotations
 import argparse
 import json
 import re
+import shutil
+import time
 from pathlib import Path
 
 from mercury_common import (HERMES_ROOT, MercuryError, emit, get_project, gh, hermes, main_guard,
@@ -23,6 +25,9 @@ from mercury_common import (HERMES_ROOT, MercuryError, emit, get_project, gh, he
 from mercury_code import NEVER_COMMIT, changed_files, git
 
 HOOKS_DIR = HERMES_ROOT / "mercury" / "hooks"
+APKS = HERMES_ROOT / "mercury" / "apks"
+# Where the gates leave a debug APK (Gradle app module, Flutter)
+APK_GLOBS = ("app/build/outputs/apk/debug/*.apk", "build/app/outputs/flutter-apk/app-debug.apk")
 _PR_URL_RE = re.compile(r"https://github\.com/[^/\s]+/[^/\s]+/pull/(\d+)")
 
 
@@ -38,6 +43,25 @@ def check_branch(project: dict, worktree: Path) -> str:
     return branch
 
 
+# Untracked machine config a build needs: a worktree has no copy. Only the SDK
+# path lines are carried over, never anything else such a file may hold.
+LOCAL_CONFIG = ("local.properties", "android/local.properties")
+_SDK_LINE = re.compile(r"^(sdk\.dir|flutter\.sdk)=")
+
+
+def carry_local_config(project: dict, worktree: Path) -> list[str]:
+    done = []
+    for rel in LOCAL_CONFIG:
+        src, dst = Path(project["path"]) / rel, worktree / rel
+        if not src.is_file() or dst.exists() or not dst.parent.is_dir():
+            continue
+        lines = [ln for ln in src.read_text(encoding="utf-8", errors="ignore").splitlines() if _SDK_LINE.match(ln)]
+        if lines:
+            dst.write_text("\n".join(lines) + "\n", encoding="utf-8")
+            done.append(rel)
+    return done
+
+
 def cmd_prepare(a) -> int:
     project = get_project(a.project)
     worktree = Path(a.worktree).resolve()
@@ -48,11 +72,28 @@ def cmd_prepare(a) -> int:
     git(worktree, "config", "extensions.worktreeConfig", "true")
     git(worktree, "config", "--worktree", "core.hooksPath", str(HOOKS_DIR))
     git(worktree, "config", "--worktree", "mercury.allowedBranchPrefix", branch_prefix(project))
+    carried = carry_local_config(project, worktree)
     state = update_task_state(a.task, project=project["id"], worktree=str(worktree), branch=branch,
-                              phase="working")
+                              phase="working", preparedAt=time.time())
     return emit({"ok": True, "branch": branch, "guard": "pre-push installed for this worktree only",
+                 "localConfig": carried,
                  "issue": state.get("issue"), "coder": project.get("coder", "claude"),
                  "gates": project.get("gates", "")})
+
+
+def keep_local_apk(project: dict, worktree: Path, state: dict, pr_number: int, head: str) -> str | None:
+    """The debug APK the gates built during this task, kept as the PR head's test
+    build (for repos whose CI doesn't build one on PRs). Older files are ignored:
+    a stale APK from before the task would be a different app."""
+    since = float(state.get("preparedAt") or 0)
+    fresh = [p for pattern in APK_GLOBS for p in worktree.glob(pattern) if p.stat().st_mtime >= since]
+    if not fresh:
+        return None
+    src = max(fresh, key=lambda p: p.stat().st_mtime)
+    dest = APKS / project["id"] / f"pr{pr_number}-{head[:7]}-local.apk"
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(src, dest)
+    return str(dest)
 
 
 def cmd_publish(a) -> int:
@@ -99,13 +140,16 @@ def cmd_publish(a) -> int:
         if not m:
             raise MercuryError(f"gh did not return a PR URL: {(out.stdout or '')[-200:]}")
         pr_number, pr_url = int(m.group(1)), m.group(0)
+    head = git(worktree, "rev-parse", "HEAD")
+    apk = keep_local_apk(project, worktree, state, pr_number, head)
     update_task_state(a.task, prUrl=pr_url, prNumber=pr_number, phase="review", ci="pending",
-                      coder=a.coder or project.get("coder"))
+                      coder=a.coder or project.get("coder"), headSha=head,
+                      localApk=apk, localApkSha=head if apk else None)
     hermes("kanban", "--board", project["board"], "comment", a.task, f"PR: {pr_url}", check=False)
     hermes("kanban", "--board", project["board"], "request-review", a.task,
            "--summary", f"PR #{pr_number} opened: {pr_url}", check=False)
     return emit({"ok": True, "pr": pr_url, "prNumber": pr_number, "committed": stage,
-                 "notCommitted": skipped, "branch": branch})
+                 "notCommitted": skipped, "branch": branch, "testBuild": apk})
 
 
 def cmd_block(a) -> int:
