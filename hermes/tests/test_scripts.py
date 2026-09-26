@@ -688,3 +688,16 @@ def test_prepare_carries_only_the_sdk_path_into_the_worktree(env, shipped):
     find the SDK (lumen). Only the SDK line may cross over."""
     text = (shipped["wt"] / "local.properties").read_text()
     assert text == "sdk.dir=/opt/android-sdk\n"
+
+
+def test_gates_find_per_user_toolchains(env, repo, coder):
+    """flutter lives in ~/dev/flutter/bin, which a login shell doesn't put on PATH."""
+    tool = env.home / "dev" / "flutter" / "bin"
+    tool.mkdir(parents=True)
+    (tool / "flutter").write_text("#!/bin/sh\necho flutter-ran\n")
+    (tool / "flutter").chmod(0o755)
+    env.project(gates="flutter")
+    rc, out = env.run("mercury_code.py", "gates", "--project", "demo", "--worktree", str(repo["wt"]),
+                      PATH="/usr/bin:/bin")
+    assert rc == 0, out
+    assert "flutter-ran" in out["gates"]["tail"]

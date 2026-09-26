@@ -19,10 +19,11 @@ unavailable (no usable coder; the worker codes it itself) | failed.
 from __future__ import annotations
 
 import argparse
+import os
 import re
 from pathlib import Path
 
-from mercury_common import HERMES_ROOT, MercuryError, emit, get_project, main_guard, real_env, run
+from mercury_common import HERMES_ROOT, REAL_HOME, MercuryError, emit, get_project, main_guard, real_env, run
 
 CODE_TASK = HERMES_ROOT / "scripts" / "code_task.py"
 _SECRET_NAME = re.compile(r"(TOKEN|SECRET|PASSWORD|PASSWD|API_KEY|_KEY$|CREDENTIAL)", re.I)
@@ -32,11 +33,22 @@ NEVER_COMMIT = re.compile(r"(^|/)(data/(transactions|rules|config|categories|acc
                           r"|local\.properties)$")
 
 
+# Per-user toolchains a login shell doesn't put on PATH here (flutter lives in
+# ~/dev/flutter): without them a Flutter repo's gates fail with "not found".
+TOOL_DIRS = ("dev/flutter/bin", "flutter/bin", ".local/bin", ".pub-cache/bin")
+
+
 def coder_env() -> dict:
     env = real_env()
     for name in list(env):
         if _SECRET_NAME.search(name):
             del env[name]
+    path = env.get("PATH", "").split(os.pathsep) if env.get("PATH") else []
+    for rel in TOOL_DIRS:
+        d = str(REAL_HOME / rel)
+        if Path(d).is_dir() and d not in path:
+            path.append(d)
+    env["PATH"] = os.pathsep.join(path)
     return env
 
 
