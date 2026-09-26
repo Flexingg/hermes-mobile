@@ -437,8 +437,12 @@ def _gateway_up() -> bool:
 
 @app.get("/api/v1/sessions")
 def sessions():
+    return _list_sessions(_listed_profiles())
+
+
+def _list_sessions(profiles: list[str | None]) -> list[dict]:
     out = []
-    for prof in _listed_profiles():
+    for prof in profiles:
         if prof is not None and not _profile_db_path(prof).exists():
             continue
         con = _db(prof)
@@ -819,12 +823,18 @@ def send_message(session_id: str, body: dict):
         named_profile(profile)
     except ValueError:
         raise HTTPException(status_code=400, detail="invalid profile")
-    _spawn_hermes(session_id, text, attachments, profile=profile)
+    system = None
+    if (body.get("mode") or "chat") == "plan":
+        project = _project_for(body.get("project"), profile)
+        text = f"[Mercury Plan · project {project['id']} · {project['repo']}]\n{text}"
+        system = _PLAN_SYSTEM.format(**project)
+    _spawn_hermes(session_id, text, attachments, profile=profile, system=system)
     return {"ok": True, "pending": True}
 
 
 def _spawn_hermes(
-    session_id: str, text: str, attachments: list | None = None, profile: str | None = None
+    session_id: str, text: str, attachments: list | None = None, profile: str | None = None,
+    system: str | None = None,
 ) -> None:
     attachments = attachments or []
     query = text
@@ -854,7 +864,7 @@ def _spawn_hermes(
         if img_path is None and HERMES_API.serves(prof) and HERMES_API.available():
             try:
                 HERMES_API.stream_chat(session_id, query, lambda c: _broadcast(session_id, c),
-                                       profile=prof)
+                                       profile=prof, system=system)
                 _broadcast(session_id, {"event": "done"})
                 _send_chat_reply_push(session_id)
                 return
@@ -1377,11 +1387,21 @@ def toggle_skill(skill_id: str):
     )
 
 
+def _mem_dir(profile: str | None = None) -> Path:
+    """Each profile has its own memory (a project's agent remembers its repo)."""
+    try:
+        name = named_profile(profile)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="invalid profile")
+    return MEM_DIR if name is None else PROFILES_DIR / name / "memories"
+
+
 @app.get("/api/v1/memory")
-def memory():
+def memory(profile: str | None = None):
     out = []
+    mem_dir = _mem_dir(profile)
     for fname, cat in (("USER.md", "user"), ("MEMORY.md", "memory")):
-        f = MEM_DIR / fname
+        f = mem_dir / fname
         if not f.exists():
             continue
         text = f.read_text(errors="ignore")
@@ -1397,8 +1417,8 @@ def memory():
 
 
 @app.get("/api/v1/memory/search")
-def memory_search(q: str = ""):
-    return [m for m in memory() if q.lower() in m["content"].lower()]
+def memory_search(q: str = "", profile: str | None = None):
+    return [m for m in memory(profile) if q.lower() in m["content"].lower()]
 
 
 # --- memory writes ----------------------------------------------------------
@@ -1406,24 +1426,25 @@ def memory_search(q: str = ""):
 # implemented GET, so every save died on a 405 that the UI swallowed. These are
 # file-backed (memories/USER.md, memories/MEMORY.md), written atomically so a
 # crash mid-write cannot truncate live memory.
-def _memory_category(category: str) -> tuple[str, Path]:
+def _memory_category(category: str, profile: str | None = None) -> tuple[str, Path]:
     cat = (category or "").strip().lower()
+    mem_dir = _mem_dir(profile)
     if cat in ("user", "user.md"):
-        return "user", MEM_DIR / "USER.md"
+        return "user", mem_dir / "USER.md"
     if cat in ("memory", "mem", "memory.md", ""):
-        return "memory", MEM_DIR / "MEMORY.md"
+        return "memory", mem_dir / "MEMORY.md"
     raise HTTPException(status_code=400, detail="category must be 'user' or 'memory'")
 
 
-def _memory_entries(category: str) -> list[str]:
-    _, path = _memory_category(category)
+def _memory_entries(category: str, profile: str | None = None) -> list[str]:
+    _, path = _memory_category(category, profile)
     if not path.exists():
         return []
     return [e.strip() for e in re.split(r"\n\s*§\s*\n", path.read_text(errors="ignore")) if e.strip()]
 
 
-def _write_memory_entries(category: str, entries: list[str]) -> None:
-    _, path = _memory_category(category)
+def _write_memory_entries(category: str, entries: list[str], profile: str | None = None) -> None:
+    _, path = _memory_category(category, profile)
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(path.name + ".tmp")
     tmp.write_text("\n\n§\n\n".join(entries) + ("\n" if entries else ""))
@@ -1432,15 +1453,16 @@ def _write_memory_entries(category: str, entries: list[str]) -> None:
 
 @app.post("/api/v1/memory")
 def add_memory(body: dict):
-    category, _ = _memory_category(body.get("category") or "")
+    profile = body.get("profile") or None
+    category, _ = _memory_category(body.get("category") or "", profile)
     content = (body.get("content") or "").strip()
     if not content:
         raise HTTPException(status_code=400, detail="content required")
     if len(content) > 2000:
         raise HTTPException(status_code=400, detail="content too long (2000 char max)")
-    entries = _memory_entries(category)
+    entries = _memory_entries(category, profile)
     entries.append(content)
-    _write_memory_entries(category, entries)
+    _write_memory_entries(category, entries, profile)
     return {
         "id": f"{category}-{len(entries) - 1}",
         "category": category,
@@ -1450,16 +1472,16 @@ def add_memory(body: dict):
 
 
 @app.delete("/api/v1/memory/{entry_id}")
-def delete_memory(entry_id: str):
+def delete_memory(entry_id: str, profile: str | None = None):
     m = re.fullmatch(r"(user|memory)-(\d+)", entry_id or "")
     if not m:
         raise HTTPException(status_code=400, detail="id must look like 'user-3' or 'memory-0'")
     category, idx = m.group(1), int(m.group(2))
-    entries = _memory_entries(category)
+    entries = _memory_entries(category, profile)
     if idx >= len(entries):
         raise HTTPException(status_code=404, detail="memory entry not found")
     entries.pop(idx)
-    _write_memory_entries(category, entries)
+    _write_memory_entries(category, entries, profile)
     return {"ok": True}
 
 
@@ -2806,6 +2828,323 @@ def healthz():
     # Deliberately unauthenticated (a monitor or systemd probe needs it), so it
     # must not disclose anything: it used to return the HERMES_HOME path.
     return {"ok": True}
+
+
+# ---------------------------------------------------------------------------
+# Mercury projects. Read views over what Hermes records, and relays into Hermes.
+# Hermes decides and acts (hermes/ in this repo: skills, scripts, kanban, cron);
+# nothing in this section writes to GitHub, a kanban board or the registry.
+# ---------------------------------------------------------------------------
+MERCURY_DIR = HERMES / "mercury"
+MERCURY_BIN = MERCURY_DIR / "bin"
+_EVENTS: list[dict] = []
+_EVENTS_LOCK = threading.Lock()
+_EVENT_LIMIT = 200
+_EVENTS_CHANNEL = "mercury:events"
+_NOTIFY_KINDS = ("ready", "needs_you", "working", "info")
+_PUSHED_KINDS = ("ready", "needs_you", "info")
+_LOOPBACK = {"127.0.0.1", "::1"}  # /internal/notify callers: Hermes on this host only
+
+_PLAN_SYSTEM = (
+    "Mercury Plan mode for project {id} ({repo}). Load and follow the `issue-planner` skill. "
+    "This turn is READ-ONLY: read and search code, git log and existing issues only; do not edit "
+    "files, run builds, commit, push or file anything. When the scope is clear, end your reply "
+    "with one ```issue-draft JSON block."
+)
+
+# kanban status -> the phase the app shows, before Mercury's own task state refines it
+_PHASE_FROM_STATUS = {"triage": "queued", "todo": "queued", "ready": "queued", "scheduled": "queued",
+                      "running": "working", "review": "review", "blocked": "needs_you",
+                      "done": "done", "archived": "cancelled"}
+_STATUS_ORDER = ("needs_you", "ready", "working", "queued", "idle")
+
+
+def _mercury_projects() -> list[dict]:
+    try:
+        return json.loads((MERCURY_DIR / "projects.json").read_text()).get("projects", [])
+    except (OSError, ValueError):
+        return []
+
+
+def _project_or_404(pid: str) -> dict:
+    for p in _mercury_projects():
+        if p["id"] == pid:
+            return p
+    raise HTTPException(status_code=404, detail=f"no linked project {pid!r}")
+
+
+def _project_for(pid: str | None, profile: str | None) -> dict:
+    """The project a Plan-mode turn belongs to: named, or the one run by `profile`."""
+    if pid:
+        return _project_or_404(pid)
+    for p in _mercury_projects():
+        if p.get("profile") == profile:
+            return p
+    raise HTTPException(status_code=400, detail="Plan mode needs a linked project")
+
+
+def _task_phase(status: str, state: dict) -> str:
+    phase = state.get("phase")
+    if status == "running":
+        return "working"
+    if status == "blocked":
+        return "needs_you"
+    if phase in ("ready", "merged", "closed", "needs_you") and status in ("review", "done", "archived"):
+        return phase
+    if status == "review":
+        return phase if phase in ("review", "ci_retry") else "review"
+    return _PHASE_FROM_STATUS.get(status, "queued")
+
+
+def _board_tasks(project: dict) -> list[dict]:
+    db = HERMES / "kanban" / "boards" / project["board"] / "kanban.db"
+    if not db.exists():
+        return []
+    con = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+    con.row_factory = sqlite3.Row
+    try:
+        rows = con.execute(
+            """SELECT id, title, status, created_at, started_at, completed_at, branch_name,
+                      idempotency_key, last_failure_error
+               FROM tasks WHERE status != 'archived' OR created_at > ?
+               ORDER BY created_at DESC LIMIT 100""", (_now() - 7 * 86400,)).fetchall()
+    finally:
+        con.close()
+    out = []
+    for r in rows:
+        state = {}
+        try:
+            state = json.loads((MERCURY_DIR / "tasks" / f"{r['id']}.json").read_text())
+        except (OSError, ValueError):
+            pass
+        out.append({
+            "id": r["id"],
+            "title": state.get("title") or r["title"],
+            "status": r["status"],
+            "phase": _task_phase(r["status"], state),
+            "issue": state.get("issue"),
+            "issueUrl": state.get("issueUrl"),
+            "prNumber": state.get("prNumber"),
+            "prUrl": state.get("prUrl"),
+            "ci": state.get("ci"),
+            "failingChecks": state.get("failingChecks") or [],
+            "apk": state.get("apk"),
+            "coder": state.get("coder") or project.get("coder"),
+            "branch": r["branch_name"],
+            "blockedReason": state.get("blockedReason") or r["last_failure_error"],
+            "createdAt": _iso(r["created_at"]),
+            "updatedAt": _iso(state.get("updatedAt") or r["completed_at"] or r["started_at"] or r["created_at"]),
+        })
+    return out
+
+
+def _project_view(project: dict, tasks: list[dict] | None = None) -> dict:
+    tasks = _board_tasks(project) if tasks is None else tasks
+    counts: dict[str, int] = {}
+    for t in tasks:
+        counts[t["phase"]] = counts.get(t["phase"], 0) + 1
+    active = {"needs_you": counts.get("needs_you", 0), "ready": counts.get("ready", 0),
+              "working": sum(counts.get(k, 0) for k in ("working", "review", "ci_retry")),
+              "queued": counts.get("queued", 0)}
+    status = next((k for k in _STATUS_ORDER[:-1] if active.get(k)), "idle")
+    return {
+        "id": project["id"], "name": project.get("name", project["id"]), "repo": project["repo"],
+        "profile": project["profile"], "coder": project.get("coder", "claude"),
+        "gates": project.get("gates", ""), "defaultBranch": project.get("defaultBranch", "main"),
+        "idleSleepMinutes": project.get("idleSleepMinutes", 10),
+        "status": status, "counts": active, "awake": active["working"] > 0,
+        "lastTask": tasks[0] if tasks else None, "color": _hash_color(project["id"]),
+    }
+
+
+@app.get("/api/v1/projects")
+def projects():
+    return [_project_view(p) for p in _mercury_projects()]
+
+
+@app.get("/api/v1/projects/{pid}")
+def project_detail(pid: str):
+    project = _project_or_404(pid)
+    tasks = _board_tasks(project)
+    return {**_project_view(project, tasks), "tasks": tasks}
+
+
+@app.get("/api/v1/projects/{pid}/tasks")
+def project_tasks(pid: str):
+    return _board_tasks(_project_or_404(pid))
+
+
+@app.get("/api/v1/projects/{pid}/sessions")
+def project_sessions(pid: str):
+    project = _project_or_404(pid)
+    if not _profile_db_path(project["profile"]).exists():
+        return []
+    return _list_sessions([project["profile"]])
+
+
+_REPOS_CACHE: dict = {"at": 0.0, "data": []}
+
+
+@app.get("/api/v1/github/repos")
+def github_repos():
+    """Repos the host's gh login can see, for the link sheet (read-only)."""
+    if time.time() - _REPOS_CACHE["at"] > 60:
+        try:
+            p = subprocess.run(["gh", "repo", "list", "--limit", "200", "--json",
+                                "nameWithOwner,description,primaryLanguage,updatedAt,isPrivate"],
+                               capture_output=True, text=True, timeout=30)
+        except (OSError, subprocess.TimeoutExpired) as e:
+            raise HTTPException(status_code=503, detail=f"gh unavailable: {e}")
+        if p.returncode != 0:
+            raise HTTPException(status_code=503, detail=(p.stderr or "gh failed").strip()[-300:])
+        _REPOS_CACHE.update(at=time.time(), data=json.loads(p.stdout or "[]"))
+    linked = {p["repo"].lower(): p["id"] for p in _mercury_projects()}
+    return [{"repo": r["nameWithOwner"], "description": r.get("description") or "",
+             "language": (r.get("primaryLanguage") or {}).get("name"), "private": r.get("isPrivate", False),
+             "updatedAt": r.get("updatedAt"), "linkedAs": linked.get(r["nameWithOwner"].lower())}
+            for r in _REPOS_CACHE["data"]]
+
+
+@app.get("/api/v1/agents")
+def agents():
+    script = MERCURY_BIN / "mercury_resources.py"
+    if not script.exists():
+        raise HTTPException(status_code=503, detail="Mercury's Hermes scripts are not installed (hermes/install.sh)")
+    p = subprocess.run(["python3", str(script), "snapshot"], capture_output=True, text=True, timeout=20)
+    try:
+        return json.loads(p.stdout)
+    except ValueError:
+        raise HTTPException(status_code=502, detail="resource snapshot failed")
+
+
+def _orchestrator_session() -> str:
+    """The default profile's chat that the app pins as "Hermes"; intents land here."""
+    path = MERCURY_DIR / "orchestrator.json"
+    try:
+        sid = json.loads(path.read_text()).get("sessionId")
+    except (OSError, ValueError):
+        sid = None
+    if sid and _session_title(sid) is not None:
+        return sid
+    if not HERMES_API.available():
+        raise HTTPException(status_code=503, detail="the Hermes API server is not reachable")
+    try:
+        sid = HERMES_API.create_session(title="Hermes · Mercury")
+    except HermesApiError as e:
+        raise HTTPException(status_code=502, detail=f"could not create the Hermes chat: {e}")
+    MERCURY_DIR.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(json.dumps({"sessionId": sid}))
+    os.replace(tmp, path)
+    return sid
+
+
+@app.get("/api/v1/orchestrator")
+def orchestrator():
+    return {"sessionId": _orchestrator_session(), "profileId": "hermes", "title": "Hermes"}
+
+
+# What the app may ask Hermes to do. The text is what Hermes sees; the
+# mercury-orchestrator / issue-planner skills say how to act on each one.
+_INTENTS = {
+    "link_repo": "link repo", "set_project": "set project", "unlink": "unlink",
+    "retry_task": "retry task", "cancel_task": "cancel task", "pause": "pause", "resume": "resume",
+    "file_issue": "file issue",
+}
+
+
+@app.post("/api/v1/hermes/intent")
+def hermes_intent(body: dict):
+    kind = body.get("kind") or ""
+    if kind not in _INTENTS:
+        raise HTTPException(status_code=400, detail=f"unknown intent {kind!r}")
+    payload = body.get("payload") or {}
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=400, detail="payload must be an object")
+    if kind == "file_issue":
+        # goes to the project agent's Plan chat: it drafted the issue, it files it
+        project = _project_or_404(body.get("project") or "")
+        sid, profile = body.get("sessionId") or "", project["profile"]
+        if not sid:
+            raise HTTPException(status_code=400, detail="file_issue needs the Plan chat's sessionId")
+        text = f"[Mercury Plan · project {project['id']} · {project['repo']}]\n[Mercury: file issue] " \
+               + json.dumps(payload.get("draft") or payload)
+    else:
+        if body.get("project"):
+            payload = {"project": body["project"], **payload}
+        sid, profile = _orchestrator_session(), None
+        text = f"[Mercury: {_INTENTS[kind]}] {json.dumps(payload)}"
+    if not HERMES_API.serves(profile) or not HERMES_API.available():
+        raise HTTPException(status_code=503, detail="the Hermes API server is not reachable")
+    try:
+        result = HERMES_API.chat(sid, text, timeout=300, profile=profile)
+    except HermesApiError as e:
+        raise HTTPException(status_code=502, detail=f"hermes failed: {e}")
+    return {"sessionId": result["session_id"], "reply": result["content"], "kind": kind}
+
+
+def _notify_key() -> str:
+    try:
+        return (MERCURY_DIR / "notify.key").read_text().strip()
+    except OSError:
+        return ""
+
+
+@app.post("/internal/notify")
+async def internal_notify(request: Request):
+    """Hermes (mercury_notify.py) -> the phone. Loopback only, with the notify key
+    install.sh created; the app's bearer token is not accepted here."""
+    host = request.client.host if request.client else ""
+    key = _notify_key()
+    supplied = request.headers.get("X-Mercury-Notify-Key", "")
+    if host not in _LOOPBACK or not key or not hmac.compare_digest(supplied.encode(), key.encode()):
+        raise HTTPException(status_code=403, detail="forbidden")
+    body = await request.json()
+    kind = body.get("kind")
+    if kind not in _NOTIFY_KINDS:
+        raise HTTPException(status_code=400, detail="bad kind")
+    import uuid
+
+    event = {
+        "id": uuid.uuid4().hex[:12], "at": _iso(_now()), "kind": kind,
+        "project": str(body.get("project") or "")[:80], "task": body.get("task"),
+        "title": str(body.get("title") or "")[:200], "body": str(body.get("body") or "")[:1000],
+        "url": body.get("url"), "apk": body.get("apk"),
+    }
+    with _EVENTS_LOCK:
+        _EVENTS.append(event)
+        del _EVENTS[:-_EVENT_LIMIT]
+    _broadcast(_EVENTS_CHANNEL, {"event": "project_event", **event})
+    pushed = 0
+    if kind in _PUSHED_KINDS:
+        pushed = _send_push(event["title"], event["body"] or event["title"],
+                            {"type": "project", "kind": kind, "project": event["project"],
+                             "task": event["task"] or "", "url": event["url"] or "", "apk": event["apk"] or ""})
+    return {"ok": True, "id": event["id"], "pushed": pushed}
+
+
+@app.get("/api/v1/events")
+def events(since: str | None = None):
+    with _EVENTS_LOCK:
+        items = list(_EVENTS)
+    return [e for e in items if not since or e["at"] > since]
+
+
+@app.websocket("/ws/events")
+async def ws_events(websocket: WebSocket):
+    if not _token_ok(_request_token(websocket)):
+        await websocket.close(code=1008)
+        return
+    await websocket.accept()
+    q: asyncio.Queue = asyncio.Queue()
+    _register_queue(_EVENTS_CHANNEL, q)
+    try:
+        while True:
+            await websocket.send_text(json.dumps(await q.get()))
+    except WebSocketDisconnect:
+        pass
+    finally:
+        _unregister_queue(_EVENTS_CHANNEL, q)
 
 
 if __name__ == "__main__":

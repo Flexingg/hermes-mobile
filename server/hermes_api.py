@@ -181,11 +181,11 @@ class HermesApi:
         return sid
 
     def chat(self, session_id: str, text: str, timeout: float = TURN_TIMEOUT,
-             profile: str | None = None) -> dict:
+             profile: str | None = None, system: str | None = None) -> dict:
         """One synchronous turn; returns ``{"session_id", "content"}``."""
         status, data = self._request(
             "POST", f"/api/sessions/{quote(session_id, safe='')}/chat",
-            {"message": text}, timeout=timeout, profile=profile,
+            _turn_body(text, system), timeout=timeout, profile=profile,
         )
         if status != 200:
             raise HermesApiError(_error_text(data, "chat failed"), status=status)
@@ -195,7 +195,7 @@ class HermesApi:
         }
 
     def stream_chat(self, session_id: str, text: str, emit: Callable[[dict], None],
-                    profile: str | None = None) -> None:
+                    profile: str | None = None, system: str | None = None) -> None:
         """Run one turn and relay it as bridge chunks through ``emit``.
 
         Emits ``{"event": "chunk", ...}`` payloads only; the caller sends ``done``.
@@ -208,7 +208,7 @@ class HermesApi:
             try:
                 conn.request("POST", self._prefix(profile)
                              + f"/api/sessions/{quote(session_id, safe='')}/chat/stream",
-                             body=json.dumps({"message": text}), headers=self._headers(profile))
+                             body=json.dumps(_turn_body(text, system)), headers=self._headers(profile))
                 resp = conn.getresponse()
             except _TRANSPORT_ERRORS as exc:
                 self.mark_down()
@@ -234,6 +234,14 @@ class HermesApi:
             raise HermesApiError(f"stream interrupted: {exc}", started=started) from exc
         finally:
             conn.close()
+
+
+def _turn_body(text: str, system: str | None) -> dict:
+    """A turn; `system` is an extra system message for this turn only (Plan mode)."""
+    body = {"message": text}
+    if system:
+        body["system_message"] = system
+    return body
 
 
 def _error_text(data: dict, fallback: str) -> str:
