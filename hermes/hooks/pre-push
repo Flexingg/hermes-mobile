@@ -1,0 +1,29 @@
+#!/usr/bin/env bash
+# Mercury task-worktree push guard. Installed per worktree only (core.hooksPath
+# via extensions.worktreeConfig), so it never affects a person's own clone.
+#
+# Allows only fast-forward pushes of branches under the task's prefix
+# (git config mercury.allowedBranchPrefix, e.g. "lumen-launcher/t_"). Refuses
+# the default branch, any other branch, deletes, tags and force pushes.
+# `git push --no-verify` can bypass a hook: this is a strong guard, not a
+# guarantee, and mercury_code.py re-checks the branch after every coder run.
+set -u
+prefix="$(git config --get mercury.allowedBranchPrefix || true)"
+if [ -z "$prefix" ]; then
+  echo "mercury pre-push: no mercury.allowedBranchPrefix configured; refusing" >&2
+  exit 1
+fi
+zero="0000000000000000000000000000000000000000"
+while read -r local_ref local_sha remote_ref remote_sha; do
+  case "$remote_ref" in
+    refs/heads/"$prefix"*) ;;
+    *) echo "mercury pre-push: refusing to push to $remote_ref (only refs/heads/${prefix}*)" >&2; exit 1 ;;
+  esac
+  if [ "$local_sha" = "$zero" ]; then
+    echo "mercury pre-push: refusing to delete $remote_ref" >&2; exit 1
+  fi
+  if [ "$remote_sha" != "$zero" ] && ! git merge-base --is-ancestor "$remote_sha" "$local_sha" 2>/dev/null; then
+    echo "mercury pre-push: refusing non-fast-forward push to $remote_ref" >&2; exit 1
+  fi
+done
+exit 0

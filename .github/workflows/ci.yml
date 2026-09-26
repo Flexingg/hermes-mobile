@@ -76,6 +76,18 @@ jobs:
             exit 1
           fi
 
+      - name: Hermes-side scripts (hermes/)
+        run: |
+          set -o pipefail
+          cd hermes
+          python -m pytest tests -q 2>&1 | tee /tmp/hermes-pytest.log
+          count=$(grep -oE '[0-9]+ passed' /tmp/hermes-pytest.log | tail -1 | grep -oE '^[0-9]+')
+          echo "hermes script tests passed: ${count:-0}"
+          if [ -z "$count" ] || [ "$count" -lt 35 ]; then
+            echo "::error::expected at least 35 passing hermes script tests, saw '${count:-0}'"
+            exit 1
+          fi
+
       - name: Route contract (app calls vs bridge routes)
         run: python3 tools/contract_check.py --verbose
 
