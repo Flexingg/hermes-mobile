@@ -2,11 +2,11 @@ import '../../core/config/app_config.dart';
 import '../../data/app_repository.dart';
 import '../../data/models.dart';
 
-/// The floating assistant's own conversation.
+/// The ask bar's own conversation.
 ///
-/// Overlay turns must never post into a project chat or into whichever thread
-/// the app last had open, so the overlay keeps one dedicated session and
-/// remembers its id in [AppConfig].
+/// Its turns must never post into a project chat or into whichever thread the
+/// app last had open, so the ask bar keeps one dedicated session and remembers
+/// its id in [AppConfig].
 class AssistantSession {
   static const sessionName = 'Assistant';
 

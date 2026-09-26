@@ -4,7 +4,6 @@ import 'package:flutter/foundation.dart';
 import '../core/config/app_config.dart';
 import '../core/notifications/notifications.dart';
 import '../core/notifications/push.dart';
-import '../core/overlay/overlay_control.dart';
 import '../data/app_repository.dart';
 import '../data/hermes_repository.dart';
 import '../data/models.dart';
@@ -176,8 +175,6 @@ class AppState extends ChangeNotifier {
   }) async {
     await config.setServer(name: name, baseUrl: baseUrl, token: token);
     repo = HermesRepository(baseUrl: baseUrl, token: token);
-    // A running overlay has its own engine and its own copy of the config.
-    await OverlayControl.notifyConfigChanged();
     await _connect();
   }
 
@@ -227,7 +224,6 @@ class AppState extends ChangeNotifier {
 
   Future<void> disconnect() async {
     await config.clearServer();
-    await OverlayControl.notifyConfigChanged();
     connected = false;
     _sub?.cancel();
     sessions = [];
