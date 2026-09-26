@@ -142,5 +142,39 @@ void main() {
         throwsA(isA<ApiFailure>()),
       );
     });
+
+    test('a reply cut off mid-stream is an error, not a finished answer',
+        () async {
+      // Server sends a chunk and then the socket dies WITHOUT `done` — the old
+      // code just ended the loop, so a truncated reply was marked "sent".
+      final dying = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+      final sub2 = dying.listen((req) async {
+        final ws = await WebSocketTransformer.upgrade(req);
+        ws.add(jsonEncode({'event': 'chunk', 'type': 'answer', 'delta': 'half an answ'}));
+        await ws.close();
+      });
+      addTearDown(() async {
+        await sub2.cancel();
+        await dying.close(force: true);
+      });
+
+      final repo = HermesRepository(
+        baseUrl: 'http://127.0.0.1:${dying.port}',
+        token: 'tok',
+        client: MockClient((_) async => http.Response('{}', 200)),
+      );
+      await expectLater(
+        repo.sendMessage('s1', 'hello').toList(),
+        throwsA(isA<ApiFailure>()
+            .having((e) => e.detail, 'detail', contains('ended before the reply finished'))),
+      );
+    });
+
+    test('runCronJob tolerates the bridge\'s {"ok": true} response', () async {
+      // It used to build a CronJob from that body — a TypeError thrown *after*
+      // the run had already been queued.
+      final repo = repoFor(MockClient((_) async => http.Response('{"ok":true}', 200)));
+      await repo.runCronJob('abc123456789');
+    });
   });
 }

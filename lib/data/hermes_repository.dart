@@ -329,6 +329,7 @@ class HermesRepository implements AppRepository {
     final baseId = 'live-${DateTime.now().millisecondsSinceEpoch}';
     final accs = {'answer': '', 'thinking': '', 'technical': ''};
     String? curType;
+    var completed = false;
 
     ChatMessage msg(String type, String text, ChatMessageStatus status) {
       final parsed = type == 'answer'
@@ -353,7 +354,10 @@ class HermesRepository implements AppRepository {
     await for (final raw in _textFrames(socket)) {
       final data = jsonDecode(raw) as Map<String, dynamic>;
       final event = data['event'] as String? ?? 'chunk';
-      if (event == 'done') break;
+      if (event == 'done') {
+        completed = true;
+        break;
+      }
       final type = (data['type'] as String?) ?? 'answer';
       final delta = data['delta'] as String? ?? '';
       if (type != curType) {
@@ -366,6 +370,14 @@ class HermesRepository implements AppRepository {
       yield msg(type, accs[type]!, ChatMessageStatus.streaming);
     }
     await socket.close();
+
+    // No `done` means the socket died mid-reply (bridge restart, NAT drop). The
+    // partial text must not be presented as the finished answer — the caller
+    // reloads the thread, which fetches the authoritative text from state.db.
+    if (!completed) {
+      throw ApiFailure('WS', '/ws/chat/$sessionId', 0,
+          'the live stream ended before the reply finished — reloading the thread');
+    }
 
     if (curType != null && (accs[curType] ?? '').trim().isNotEmpty) {
       yield msg(curType, accs[curType]!, ChatMessageStatus.sent);
@@ -523,6 +535,7 @@ class HermesRepository implements AppRepository {
     final socket = await openSocket('/ws/group/$gid');
     await _post('/api/v1/groups/$gid/messages', {'text': text});
     final acc = <String, String>{};
+    var completed = false;
     try {
       await for (final raw in _textFrames(socket)) {
         final data = jsonDecode(raw) as Map<String, dynamic>;
@@ -544,11 +557,17 @@ class HermesRepository implements AppRepository {
             }
           }
         } else if (event == 'complete') {
+          completed = true;
           break;
         }
       }
     } finally {
       await socket.close();
+    }
+    // Same as sendMessage: a stream that dies mid-fan-out must not look finished.
+    if (!completed) {
+      throw ApiFailure('WS', '/ws/group/$gid', 0,
+          'the group stream ended before every agent replied — reloading');
     }
   }
 
@@ -651,9 +670,12 @@ class HermesRepository implements AppRepository {
   Future<void> deleteCronJob(String id) async => _delete('/api/v1/cron/$id');
 
   @override
-  Future<CronJob> runCronJob(String id) async {
-    final data = await _post('/api/v1/cron/$id/run');
-    return _cronFromJson(data);
+  Future<void> runCronJob(String id) async {
+    // The bridge answers {"ok": true} — it only queues the run for the
+    // scheduler. It does not return a job object, so building a CronJob from the
+    // response threw a TypeError *after* the run had already started, and the UI
+    // swallowed it.
+    await _post('/api/v1/cron/$id/run');
   }
 
   @override

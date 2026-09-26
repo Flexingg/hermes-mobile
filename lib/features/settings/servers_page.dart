@@ -48,8 +48,9 @@ class ServersPage extends StatelessWidget {
                         style: const TextStyle(fontFamily: 'monospace')),
                     trailing: IconButton(
                       icon: const Icon(Icons.delete_outline),
-                      onPressed: () => state.repo.removeServer(s.id).then(
-                          (_) => state.refreshServers()),
+                      onPressed: () => state.guard(
+                          () => state.repo.removeServer(s.id),
+                          context: 'remove server').then((_) => state.refreshServers()),
                     ),
                     children: [
                       ...s.bots.map((b) => ListTile(
@@ -97,9 +98,18 @@ class ServersPage extends StatelessWidget {
                       emoji: '🧠'),
                 ],
               );
-              await state.repo.addServer(p);
-              await state.refreshServers();
-              if (context.mounted) Navigator.pop(context);
+              final before = state.error;
+              try {
+                await state.repo.addServer(p);
+                await state.refreshServers();
+              } catch (e) {
+                // A bad URL or a rejected id used to close the sheet with the
+                // row simply never appearing.
+                state.reportError(e, context: 'add server');
+              }
+              if (!context.mounted) return;
+              if (state.error != null && state.error != before) return;
+              Navigator.pop(context);
             },
             child: const Text('Add'),
           ),

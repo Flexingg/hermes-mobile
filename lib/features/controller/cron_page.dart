@@ -76,7 +76,8 @@ class CronPage extends StatelessWidget {
                   value: j.enabled,
                   onChanged: (v) {
                     final updated = j.copyWith(enabled: v);
-                    context.read<AppState>().updateCron(updated);
+                    state.guard(() => state.updateCron(updated),
+                        context: 'save routine');
                   },
                 ),
               ),
@@ -91,13 +92,14 @@ class CronPage extends StatelessWidget {
                     label: const Text('Edit'),
                   ),
                   TextButton.icon(
-                    onPressed: () => context.read<AppState>().runCron(j.id),
+                    onPressed: () => state.guard(() => state.runCron(j.id),
+                        context: 'run routine now'),
                     icon: const Icon(Icons.play_arrow, size: 18),
                     label: const Text('Run now'),
                   ),
                   TextButton.icon(
-                    onPressed: () =>
-                        context.read<AppState>().deleteCron(j.id),
+                    onPressed: () => state.guard(() => state.deleteCron(j.id),
+                        context: 'delete routine'),
                     icon: Icon(Icons.delete_outline, size: 18, color: scheme.error),
                     label: Text('Delete', style: TextStyle(color: scheme.error)),
                   ),
@@ -148,12 +150,21 @@ class CronPage extends StatelessWidget {
                 lastRun: existing?.lastRun,
                 lastStatus: existing?.lastStatus,
               );
-              if (existing == null) {
-                await state.createCron(job);
-              } else {
-                await state.updateCron(job);
+              // Only dismiss on success: a rejected save (bad schedule, 400 from
+              // the CLI) used to close the dialog with no message at all.
+              final before = state.error;
+              try {
+                if (existing == null) {
+                  await state.createCron(job);
+                } else {
+                  await state.updateCron(job);
+                }
+              } catch (e) {
+                state.reportError(e, context: 'save routine');
               }
-              if (context.mounted) Navigator.pop(context);
+              if (!context.mounted) return;
+              if (state.error != null && state.error != before) return;
+              Navigator.pop(context);
             },
             child: const Text('Save'),
           ),

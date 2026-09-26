@@ -60,7 +60,8 @@ class _ChatThreadPageState extends State<ChatThreadPage> {
         // stale once a reply arrives via push/background (the send-stream has
         // closed), so opening the thread must refetch or it shows an old
         // message until the app is restarted. Covers notification taps too.
-        context.read<AppState>().openSession(widget.sessionId);
+        final st = context.read<AppState>();
+        st.guard(() => st.openSession(widget.sessionId), context: 'open chat');
         _startPolling();
       }
     });

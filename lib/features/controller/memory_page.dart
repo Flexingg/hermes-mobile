@@ -80,8 +80,9 @@ class MemoryPageState extends State<MemoryPage> {
                             '${e.category} · ${formatRelativeTime(e.createdAt)}'),
                         trailing: IconButton(
                           icon: const Icon(Icons.delete_outline),
-                          onPressed: () =>
-                              context.read<AppState>().deleteMemoryEntry(e.id),
+                          onPressed: () => state.guard(
+                              () => state.deleteMemoryEntry(e.id),
+                              context: 'delete memory'),
                         ),
                         onTap: () => _edit(context, state, e),
                       ),
@@ -111,9 +112,26 @@ class MemoryPageState extends State<MemoryPage> {
                 child: const Text('Cancel')),
             FilledButton(
                 onPressed: () async {
-                  await state.deleteMemoryEntry(entry.id);
-                  await state.addMemoryEntry(entry.category, c.text.trim());
-                  if (context.mounted) Navigator.pop(context);
+                  // Add FIRST, then delete the old entry. The old order deleted
+                  // before adding, so a rejected add (e.g. >2000 chars → 400)
+                  // destroyed the existing memory and left nothing in its place.
+                  // Appending cannot shift the index of an existing entry, so the
+                  // delete is still exact.
+                  final text = c.text.trim();
+                  final before = state.error;
+                  try {
+                    if (text.isEmpty) {
+                      await state.deleteMemoryEntry(entry.id);
+                    } else {
+                      await state.addMemoryEntry(entry.category, text);
+                      await state.deleteMemoryEntry(entry.id);
+                    }
+                  } catch (e) {
+                    state.reportError(e, context: 'edit memory');
+                  }
+                  if (!context.mounted) return;
+                  if (state.error != null && state.error != before) return;
+                  Navigator.pop(context);
                 },
                 child: const Text('Save')),
           ],
@@ -141,8 +159,15 @@ class MemoryPageState extends State<MemoryPage> {
             FilledButton(
                 onPressed: () async {
                   if (c.text.trim().isEmpty) return;
-                  await state.addMemoryEntry(_tab, c.text.trim());
-                  if (context.mounted) Navigator.pop(context);
+                  final before = state.error;
+                  try {
+                    await state.addMemoryEntry(_tab, c.text.trim());
+                  } catch (e) {
+                    state.reportError(e, context: 'add memory');
+                  }
+                  if (!context.mounted) return;
+                  if (state.error != null && state.error != before) return;
+                  Navigator.pop(context);
                 },
                 child: const Text('Save')),
           ],

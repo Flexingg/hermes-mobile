@@ -78,7 +78,7 @@ abstract class AppRepository {
   Future<CronJob> createCronJob(CronJob job);
   Future<void> updateCronJob(CronJob job);
   Future<void> deleteCronJob(String id);
-  Future<CronJob> runCronJob(String id);
+  Future<void> runCronJob(String id);
 
   // ---- Skills --------------------------------------------------------
   Future<List<Skill>> skills();

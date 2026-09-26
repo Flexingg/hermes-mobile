@@ -42,7 +42,12 @@ class SkillsPage extends StatelessWidget {
             ),
             trailing: Switch(
               value: s.enabled,
-              onChanged: (_) => context.read<AppState>().toggleSkillById(s.id),
+              // Hermes has no per-skill enable flag; the bridge answers 501 and
+              // `guard` puts that message on screen instead of silently flipping
+              // the switch back.
+              onChanged: (_) => context
+                  .read<AppState>()
+                  .guard(() => state.toggleSkillById(s.id), context: 'toggle skill'),
             ),
           ),
         );

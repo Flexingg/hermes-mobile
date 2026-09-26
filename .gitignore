@@ -47,16 +47,19 @@ app.*.map.json
 # Widget Preview related
 .widget_preview/
 
-# Local finance exports / sensitive data — never commit
+# Local finance exports / sensitive data — never commit.
+# NOTE the leading `/`: an unanchored `data/` also matches `lib/data/`, which
+# silently ignored lib/data/api_failure.dart and left the pushed tree unbuildable
+# for anyone else. Keep the slash.
 server/data/
 # The same class of file was committed at the repo ROOT (data/*.json held the
 # owner's real transactions, with card last-4s and merchant strings) and shipped
 # in this public repo. Nothing in the app reads it; it is an export artifact.
-data/
+/data/
 # Gradle build output that got committed by accident
-android/build/
+/android/build/
 # Delegated-agent run artifacts (see ~/.hermes/scripts/code_task.py)
-.hermes-runs/
+/.hermes-runs/
 
 # UI design scratch
 sketches/

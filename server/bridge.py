@@ -61,12 +61,24 @@ PROFILES_DIR = HERMES / "profiles"
 # serving `~/.hermes/config.yaml`, `.env` and the 144 MB `state.db` to any
 # host on the network with no credential at all.
 BRIDGE_TOKEN = (os.environ.get("BRIDGE_TOKEN") or "").strip()
+# Values from the shipped unit template / copy-paste. Accepting one of these is
+# the same as having no token: the placeholder is public.
+_PLACEHOLDER_TOKENS = {
+    "replace_with_token", "change_me", "changeme", "token", "secret",
+    "yoursecret", "your-secret", "password", "test",
+}
 if not BRIDGE_TOKEN:
     raise SystemExit(
         "BRIDGE_TOKEN is required — refusing to start an unauthenticated bridge.\n"
         "The bridge serves ~/.hermes (chat history, config, model keys) and can "
         "run shell commands as the hermes user. Set BRIDGE_TOKEN (see "
         "server/hermes-bridge.service and README > Security)."
+    )
+if BRIDGE_TOKEN.lower() in _PLACEHOLDER_TOKENS or len(BRIDGE_TOKEN) < 16:
+    raise SystemExit(
+        "BRIDGE_TOKEN is a placeholder or too short (min 16 chars) — refusing to "
+        "start. Generate one with `openssl rand -hex 24` and put it in the unit's "
+        "EnvironmentFile."
     )
 
 # Where to listen. The default stays 0.0.0.0 because the deployed unit sets no
@@ -124,15 +136,36 @@ async def lifespan(app: FastAPI):
             pass
 
 
-app = FastAPI(title="Hermes Mobile bridge", version="1.0", lifespan=lifespan)
+app = FastAPI(
+    title="Hermes Mobile bridge",
+    version="1.0",
+    lifespan=lifespan,
+    # FastAPI serves /docs, /redoc and /openapi.json by default and they are
+    # NOT under /api/v1, so the auth middleware never saw them: any host on the
+    # LAN could read the full route map (including /api/v1/terminal/run) without
+    # a token. Off unless explicitly opted in.
+    docs_url="/docs" if os.environ.get("MER_ENABLE_DOCS") == "1" else None,
+    redoc_url="/redoc" if os.environ.get("MER_ENABLE_DOCS") == "1" else None,
+    openapi_url="/openapi.json" if os.environ.get("MER_ENABLE_DOCS") == "1" else None,
+)
 app.add_middleware(
     CORSMiddleware, allow_origins=CORS_ORIGINS, allow_methods=["*"], allow_headers=["*"]
 )
 
 
 def _token_ok(supplied: str | None) -> bool:
-    """Constant-time bearer comparison (a plain `==` leaks the token by timing)."""
-    return bool(supplied) and hmac.compare_digest(str(supplied), BRIDGE_TOKEN)
+    """Constant-time bearer comparison (a plain `==` leaks the token by timing).
+
+    Compared as UTF-8 bytes: `hmac.compare_digest` raises TypeError on a str
+    containing non-ASCII characters, which turned a hostile `Authorization`
+    header into a 500 instead of a 401.
+    """
+    if not supplied:
+        return False
+    try:
+        return hmac.compare_digest(str(supplied).encode("utf-8"), BRIDGE_TOKEN.encode("utf-8"))
+    except Exception:  # noqa: BLE001 - never 500 on a malformed credential
+        return False
 
 
 def _request_token(request) -> str:
@@ -2634,7 +2667,9 @@ async def coach_sync_logs(body: dict | None = None):
 
 @app.get("/healthz")
 def healthz():
-    return {"ok": True, "hermes": str(HERMES), "db": STATE_DB.exists()}
+    # Deliberately unauthenticated (a monitor or systemd probe needs it), so it
+    # must not disclose anything: it used to return the HERMES_HOME path.
+    return {"ok": True}
 
 
 if __name__ == "__main__":

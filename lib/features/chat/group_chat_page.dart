@@ -73,7 +73,8 @@ class _GroupChatPageState extends State<GroupChatPage> {
           PopupMenuButton<String>(
             onSelected: (v) {
               if (v == 'delete') {
-                state.deleteGroup(widget.groupId);
+                state.guard(() => state.deleteGroup(widget.groupId),
+                    context: 'delete group');
                 Navigator.of(context).maybePop();
               }
             },

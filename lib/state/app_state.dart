@@ -96,6 +96,20 @@ class AppState extends ChangeNotifier {
     notifyListeners();
   }
 
+  /// Run a UI-triggered action and surface its failure.
+  ///
+  /// Every one of these call sites used to be `onPressed: () => state.doThing()`
+  /// — an unawaited future with no error handler, so a 400/404/405 from the
+  /// bridge produced no message anywhere: the row just reappeared or the dialog
+  /// stayed open. Use this at every widget callback that mutates server state.
+  Future<void> guard(Future<void> Function() job, {required String context}) async {
+    try {
+      await job();
+    } catch (e) {
+      reportError(e, context: context);
+    }
+  }
+
   /// True once a real server has been reached successfully.
   bool connected = false;
 

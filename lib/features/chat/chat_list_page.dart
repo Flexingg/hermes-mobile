@@ -250,7 +250,8 @@ class _SessionTile extends StatelessWidget {
         color: scheme.errorContainer,
         child: Icon(Icons.delete_outline, color: scheme.onErrorContainer),
       ),
-      onDismissed: (_) => context.read<AppState>().deleteSession(session.id),
+      onDismissed: (_) => state.guard(() => state.deleteSession(session.id),
+          context: 'delete chat'),
       child: ListTile(
         onTap: onTap,
         leading: Avatar(
