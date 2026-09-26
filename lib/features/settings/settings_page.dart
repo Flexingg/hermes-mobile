@@ -21,9 +21,14 @@ const List<Color> _accentSwatches = [
 ];
 
 /// App settings: appearance (Material You), data mode, servers, about.
-class SettingsPage extends StatelessWidget {
+class SettingsPage extends StatefulWidget {
   const SettingsPage({super.key});
 
+  @override
+  State<SettingsPage> createState() => _SettingsPageState();
+}
+
+class _SettingsPageState extends State<SettingsPage> {
   @override
   Widget build(BuildContext context) {
     final config = context.watch<AppConfig>();
@@ -266,6 +271,10 @@ class SettingsPage extends StatelessWidget {
             ),
           ),
           const SizedBox(height: 20),
+          Text('Quick ask', style: Theme.of(context).textTheme.titleMedium),
+          const SizedBox(height: 8),
+          const Card(child: _QuickAskHelp()),
+          const SizedBox(height: 20),
           Text('Notifications', style: Theme.of(context).textTheme.titleMedium),
           const SizedBox(height: 8),
           Card(
@@ -391,3 +400,61 @@ class _SegRow<T> extends StatelessWidget {
   }
 }
 
+/// How to open the ask bar from outside the app. There is nothing to switch
+/// on: the launcher shortcuts and the exported intent are always there, and
+/// opening the bar never sends anything — a send is always a tap in the bar.
+class _QuickAskHelp extends StatelessWidget {
+  const _QuickAskHelp();
+
+  // The applicationId, not the Kotlin package: the class has to be spelled out
+  // in full, or ".AskActivity" resolves inside the wrong package.
+  static const _adb = 'adb shell am start '
+      '-a com.randalls.hermes_mobile.action.ASK '
+      '-n com.randallengineering.hermes/com.randalls.hermes_mobile.AskActivity';
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    final text = Theme.of(context).textTheme;
+    final mono = text.bodySmall?.copyWith(fontFamily: 'monospace');
+    return Padding(
+      padding: const EdgeInsets.all(16),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(children: [
+            Icon(Icons.auto_awesome, color: scheme.primary),
+            const SizedBox(width: 12),
+            Expanded(
+              child: Text('Ask Hermes over any app', style: text.titleSmall),
+            ),
+          ]),
+          const SizedBox(height: 8),
+          const Text(
+              'Long-press the Mercury icon for Ask Mercury and Ask by voice; '
+              'drag either to the home screen. Anything else — Tasker, a '
+              'gesture, a quick tile, a side button, a voice command — can '
+              'fire the same intent. Opening the bar never sends anything: a '
+              'send is always a tap in the bar.'),
+          const SizedBox(height: 12),
+          Text('Tasker', style: text.labelLarge),
+          const SizedBox(height: 4),
+          SelectableText(
+              'Task → Send Intent\n'
+              'Action: com.randalls.hermes_mobile.action.ASK\n'
+              'Package: com.randallengineering.hermes\n'
+              'Class: com.randalls.hermes_mobile.AskActivity\n'
+              'Extra: mode:voice  (or mode:text and text:<your question>)\n'
+              'Target: Activity',
+              style: mono),
+          const SizedBox(height: 12),
+          Text('adb (to try it without Tasker)', style: text.labelLarge),
+          const SizedBox(height: 4),
+          SelectableText('$_adb --es mode voice', style: mono),
+          const SizedBox(height: 4),
+          SelectableText("$_adb --es text 'what is on my calendar'", style: mono),
+        ],
+      ),
+    );
+  }
+}

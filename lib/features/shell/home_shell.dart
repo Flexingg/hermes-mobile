@@ -18,8 +18,31 @@ class HomeShell extends StatefulWidget {
   State<HomeShell> createState() => _HomeShellState();
 }
 
-class _HomeShellState extends State<HomeShell> {
+class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
   int _index = 0;
+
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addObserver(this);
+  }
+
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState lifecycle) {
+    // The ask bar creates its 'Assistant' session from its own engine, which
+    // this app never hears about; without a reload on return the chat list
+    // would not show the conversation the user just had. Skipped while
+    // disconnected, where a reload could only put up an error banner.
+    if (lifecycle != AppLifecycleState.resumed) return;
+    final state = context.read<AppState>();
+    if (state.connected) state.refreshSessions();
+  }
 
   /// Work waiting on the user: PRs ready to test plus tasks that need them.
   int _attention(AppState state) => state.projects.fold(0, (n, p) => n + p.ready + p.needsYou);

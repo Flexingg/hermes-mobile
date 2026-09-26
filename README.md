@@ -197,6 +197,44 @@ script left behind (test-enforced).
   optional *Access client ID / secret* fields send the service token on every request (including the
   WebSocket handshake). Both halves are stored in the Android keystore, like the API token.
 
+## ⚡ Quick ask (shortcuts, Tasker, adb)
+
+The ask bar opens **on demand** over whatever app is on screen: a translucent `AskActivity` (its own
+Flutter engine, `lib/features/assistant/ask_main.dart`) with the app underneath paused but still visible.
+There is no overlay permission, no foreground service and no standing notification. Turns go to the
+dedicated **Assistant** session, never a project chat or the last-open thread; the app's chat list
+picks it up when Mercury resumes.
+
+- **Launcher shortcuts** — long-press the Mercury icon for **Ask Mercury** (text) and **Ask by voice**
+  (starts listening as soon as the bar opens); either can be dragged to the home screen.
+- **Anything else** (Tasker, a gesture, a quick tile, a side button, a voice command) fires the same
+  exported intent:
+
+| | |
+|---|---|
+| Action | `com.randalls.hermes_mobile.action.ASK` |
+| Component | `com.randallengineering.hermes/com.randalls.hermes_mobile.AskActivity` |
+| `mode` extra | `text` (default) or `voice`; anything else opens a text bar |
+| `text` extra | prefills the field |
+
+The package is the `applicationId` (`com.randallengineering.hermes`), which differs from the Kotlin
+package, so the class must be written out in full — `-n <package>/.AskActivity` does not resolve.
+
+**Opening the bar never sends anything.** Any app on the device can send this intent, so it can only
+open, prefill and start listening; a send is always a tap on Send in the bar.
+
+**Tasker:** *Task → Send Intent* — Action `com.randalls.hermes_mobile.action.ASK`, Package
+`com.randallengineering.hermes`, Class `com.randalls.hermes_mobile.AskActivity`, Extra `mode:voice`
+(or `mode:text` and `text:<your question>`), Target *Activity*.
+
+**adb** (to try it without Tasker):
+```bash
+adb shell am start -a com.randalls.hermes_mobile.action.ASK \
+  -n com.randallengineering.hermes/com.randalls.hermes_mobile.AskActivity --es mode voice
+adb shell am start -a com.randalls.hermes_mobile.action.ASK \
+  -n com.randallengineering.hermes/com.randalls.hermes_mobile.AskActivity --es text 'what is on my calendar'
+```
+
 ## 🔒 Security
 
 The bridge fronts `~/.hermes` — chat history in `state.db`, `config.yaml`, the memory files — and can
@@ -242,7 +280,7 @@ build a trojaned in-place update.) Keep one keystore per app so updates install 
 ## ✅ Tests
 
 ```bash
-flutter analyze && flutter test          # 59 tests: repository, ApiFailure, reconnect, AppState, banner, projects, task actions, CLI noise
+flutter analyze && flutter test          # 80 tests: repository, ApiFailure, reconnect, AppState, banner, projects, task actions, CLI noise, ask bar
 cd server && python -m pytest tests -q   # 121 tests: bridge auth, routes, API-server chat, per-profile chats, project views, chat plumbing
 cd hermes && python -m pytest tests -q   # 60 tests: the Hermes-side scripts, run as Hermes runs them
 python3 tools/contract_check.py          # every route the app calls must exist on the bridge

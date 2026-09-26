@@ -1,10 +1,9 @@
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:image_picker/image_picker.dart';
-import 'package:path/path.dart' as p;
 import 'package:provider/provider.dart';
-import 'package:speech_to_text/speech_to_text.dart' as stt;
 import '../../state/app_state.dart';
+import 'input_actions.dart';
 
 /// Google-Messages-style message composer: attach(image/file) · text · voice/send.
 class MessageComposer extends StatefulWidget {
@@ -29,12 +28,16 @@ class _MessageComposerState extends State<MessageComposer> {
   final _controller = TextEditingController();
   final _focus = FocusNode();
   final _imagePicker = ImagePicker();
-  stt.SpeechToText? _speech;
-  bool _listening = false;
+  final _voiceInput = VoiceInputController();
+
+  bool get _listening => _voiceInput.listening;
 
   @override
   void initState() {
     super.initState();
+    _voiceInput.addListener(_onVoiceChanged);
+    // Pre-filled text the user edits before sending (a task the chat was opened
+    // from). Never sent on its own.
     final seed = widget.initialText;
     if (seed != null && seed.isNotEmpty) {
       _controller.text = seed;
@@ -46,11 +49,15 @@ class _MessageComposerState extends State<MessageComposer> {
     }
   }
 
+  void _onVoiceChanged() {
+    if (mounted) setState(() {});
+  }
+
   @override
   void dispose() {
     _controller.dispose();
     _focus.dispose();
-    _speech?.stop();
+    _voiceInput.dispose();
     super.dispose();
   }
 
@@ -69,44 +76,16 @@ class _MessageComposerState extends State<MessageComposer> {
   }
 
   Future<void> _voice() async {
-    _speech ??= stt.SpeechToText();
-    if (_listening) {
-      await _speech!.stop();
-      setState(() => _listening = false);
-      return;
+    final available = await _voiceInput.toggle((words) {
+      _controller.text = words;
+      setState(() {});
+    });
+    if (!available && mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+            content: Text('Speech recognition is unavailable on this device.')),
+      );
     }
-    final available = await _speech!.initialize(
-        onStatus: (s) {
-          if (s == 'done' || s == 'notListening') {
-            if (mounted) setState(() => _listening = false);
-          }
-        },
-        onError: (_) {
-          if (mounted) setState(() => _listening = false);
-        });
-    if (!available) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-              content: Text('Speech recognition is unavailable on this device.')),
-        );
-      }
-      return;
-    }
-    setState(() => _listening = true);
-    await _speech!.listen(
-      onResult: (r) {
-        final w = r.recognizedWords;
-        if (w.isNotEmpty) {
-          _controller.text = w;
-          setState(() {});
-        }
-      },
-      listenOptions: stt.SpeechListenOptions(
-        localeId: 'en_US',
-        listenFor: const Duration(seconds: 20),
-      ),
-    );
   }
 
   Future<void> _attach(BuildContext context) async {
@@ -149,12 +128,11 @@ class _MessageComposerState extends State<MessageComposer> {
   }
 
   Future<void> _pickImage(ImageSource source) async {
-    final picked = await _imagePicker.pickImage(source: source, maxWidth: 2048);
+    final picked = await pickImage(_imagePicker, source);
     if (picked == null || !mounted) return;
     final caption = _controller.text.trim();
     _controller.clear();
-    await _sendAttachment(
-        localPath: picked.path, name: p.basename(picked.path), mimeType: 'image/jpeg', caption: caption);
+    await _sendAttachment(picked, caption: caption);
   }
 
   Future<void> _pickFile() async {
@@ -165,34 +143,15 @@ class _MessageComposerState extends State<MessageComposer> {
     final caption = _controller.text.trim();
     _controller.clear();
     await _sendAttachment(
-        localPath: f.path!, name: f.name, mimeType: _guessMime(f.name), caption: caption);
+        LocalUpload(localPath: f.path!, name: f.name, mimeType: guessMime(f.name)),
+        caption: caption);
   }
 
-  String _guessMime(String name) {
-    final ext = p.extension(name).toLowerCase();
-    const m = <String, String>{
-      '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg',
-      '.gif': 'image/gif', '.webp': 'image/webp',
-      '.pdf': 'application/pdf', '.txt': 'text/plain', '.md': 'text/markdown',
-      '.json': 'application/json', '.csv': 'text/csv',
-      '.doc': 'application/msword', '.docx': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
-      '.xls': 'application/vnd.ms-excel', '.xlsx': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-      '.zip': 'application/zip', '.apk': 'application/vnd.android.package-archive',
-    };
-    return m[ext] ?? 'application/octet-stream';
-  }
-
-  Future<void> _sendAttachment({
-    required String localPath,
-    required String name,
-    required String mimeType,
-    required String caption,
-  }) async {
+  Future<void> _sendAttachment(LocalUpload file, {required String caption}) async {
     if (!mounted) return;
     final state = context.read<AppState>();
     try {
-      final att = await state.repo.uploadAttachment(
-          localPath: localPath, name: name, mimeType: mimeType);
+      final att = await uploadPicked(state.repo, file);
       state.sendMessage(caption, attachments: [att]);
     } catch (e) {
       if (mounted) {

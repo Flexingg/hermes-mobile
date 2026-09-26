@@ -22,6 +22,7 @@ class AppConfig extends ChangeNotifier {
   static const _kServerBase = 'cfg_server_base';
   static const _kServerTokenRef = 'cfg_server_token_ref';
   static const _kServerKind = 'cfg_server_kind';
+  static const _kAssistantSession = 'cfg_assistant_session';
 
   late ThemePreference _themePreference;
   late bool _dynamicColor;
@@ -37,6 +38,7 @@ class AppConfig extends ChangeNotifier {
   String? _serverBaseUrl;
   String? _serverTokenRef;
   ConnectionKind _serverKind = ConnectionKind.lan;
+  String? _assistantSessionId;
 
   bool get dynamicColor => _dynamicColor;
   ThemePreference get themePreference => _themePreference;
@@ -59,6 +61,10 @@ class AppConfig extends ChangeNotifier {
   /// True once a server has been configured (connection may still be pending).
   bool get hasServer => _serverBaseUrl != null && _serverBaseUrl!.isNotEmpty;
 
+  /// The dedicated session the ask bar posts into, so its turns never land in
+  /// a project chat or whatever thread was last open.
+  String? get assistantSessionId => _assistantSessionId;
+
   static Future<AppConfig> load() async {
     final prefs = await SharedPreferences.getInstance();
     return AppConfig._(prefs);
@@ -77,6 +83,7 @@ class AppConfig extends ChangeNotifier {
     _serverBaseUrl = prefs.getString(_kServerBase);
     _serverTokenRef = prefs.getString(_kServerTokenRef);
     _serverKind = ConnectionKind.parse(prefs.getString(_kServerKind));
+    _assistantSessionId = prefs.getString(_kAssistantSession);
     final seed = prefs.getInt(_kSeed);
     _seedColor = seed == null ? null : Color(seed);
   }
@@ -212,6 +219,17 @@ class AppConfig extends ChangeNotifier {
     notifyListeners();
     final p = await SharedPreferences.getInstance();
     await p.setBool(_kTech, value);
+  }
+
+  Future<void> setAssistantSessionId(String? id) async {
+    _assistantSessionId = id;
+    notifyListeners();
+    final p = await SharedPreferences.getInstance();
+    if (id == null) {
+      await p.remove(_kAssistantSession);
+    } else {
+      await p.setString(_kAssistantSession, id);
+    }
   }
 
   /// Reset appearance + UI preferences to their defaults.
