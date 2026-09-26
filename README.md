@@ -191,7 +191,7 @@ build a trojaned in-place update.) Keep one keystore per app so updates install 
 ## ✅ Tests
 
 ```bash
-flutter analyze && flutter test          # 34 tests: repository, ApiFailure, reconnect, AppState, banner, projects
+flutter analyze && flutter test          # 43 tests: repository, ApiFailure, reconnect, AppState, banner, projects, assistant overlay
 cd server && python -m pytest tests -q   # 94 tests: bridge auth, routes, API-server chat, per-profile chats, project views
 cd hermes && python -m pytest tests -q   # 46 tests: the Hermes-side scripts, run as Hermes runs them
 python3 tools/contract_check.py          # every route the app calls must exist on the bridge

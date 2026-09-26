@@ -5,6 +5,12 @@
     <uses-permission android:name="android.permission.RECORD_AUDIO"/>
     <!-- "Install APK" on a ready PR opens the system installer (the user confirms). -->
     <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES"/>
+    <!-- The floating assistant: a handle drawn over other apps by a foreground
+         service (specialUse; microphone for tap-to-talk while it is showing). -->
+    <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW"/>
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE"/>
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE"/>
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE"/>
     <application
         android:label="Mercury Messenger"
         android:name="${applicationName}"
@@ -31,6 +37,23 @@
                 <category android:name="android.intent.category.LAUNCHER"/>
             </intent-filter>
         </activity>
+        <service
+            android:name=".OverlayService"
+            android:exported="false"
+            android:stopWithTask="false"
+            android:foregroundServiceType="specialUse|microphone">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="assistant_overlay"/>
+        </service>
+        <!-- Lent to the overlay engine while the camera runs (image_picker
+             needs an activity to launch from and to return the photo to). -->
+        <activity
+            android:name=".OverlayHostActivity"
+            android:exported="false"
+            android:excludeFromRecents="true"
+            android:taskAffinity=""
+            android:theme="@android:style/Theme.Translucent.NoTitleBar"/>
         <provider
             android:name="androidx.core.content.FileProvider"
             android:authorities="${applicationId}.mercury.files"

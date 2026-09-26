@@ -1,7 +1,9 @@
+import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import '../../core/config/app_config.dart';
 import '../../core/notifications/push.dart';
+import '../../core/overlay/overlay_control.dart';
 import '../../core/theme/app_theme.dart';
 import '../../state/app_state.dart';
 import 'bots_page.dart';
@@ -21,8 +23,82 @@ const List<Color> _accentSwatches = [
 ];
 
 /// App settings: appearance (Material You), data mode, servers, about.
-class SettingsPage extends StatelessWidget {
+class SettingsPage extends StatefulWidget {
   const SettingsPage({super.key});
+
+  @override
+  State<SettingsPage> createState() => _SettingsPageState();
+}
+
+class _SettingsPageState extends State<SettingsPage> with WidgetsBindingObserver {
+  bool _overlaySupported = true;
+  bool _overlayPermission = false;
+
+  /// The user switched the assistant on without the permission: finish the
+  /// job when they come back from system Settings having granted it.
+  bool _overlayPending = false;
+  StreamSubscription<void>? _overlayStopped;
+
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addObserver(this);
+    // The notification's "Turn off" stops the service behind the app's back.
+    _overlayStopped = OverlayControl.stopped.listen((_) {
+      if (mounted) context.read<AppConfig>().setOverlayEnabled(false);
+    });
+    _refreshOverlay();
+  }
+
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    _overlayStopped?.cancel();
+    super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    // The permission is granted in system Settings, outside the app: the tile
+    // has to re-check when the user returns, not only when the page opens.
+    if (state == AppLifecycleState.resumed) _refreshOverlay();
+  }
+
+  Future<void> _refreshOverlay() async {
+    final config = context.read<AppConfig>();
+    final supported = await OverlayControl.isSupported();
+    final granted = supported && await OverlayControl.hasPermission();
+    if (!mounted) return;
+    setState(() {
+      _overlaySupported = supported;
+      _overlayPermission = granted;
+    });
+    if (_overlayPending) {
+      _overlayPending = false;
+      if (granted) await _startOverlay(config);
+    }
+  }
+
+  Future<void> _startOverlay(AppConfig config) async {
+    await OverlayControl.start();
+    await config.setOverlayEnabled(true);
+  }
+
+  Future<void> _toggleOverlay(bool on) async {
+    final config = context.read<AppConfig>();
+    if (!on) {
+      _overlayPending = false;
+      await OverlayControl.stop();
+      await config.setOverlayEnabled(false);
+      return;
+    }
+    if (await OverlayControl.hasPermission()) {
+      await _startOverlay(config);
+    } else {
+      _overlayPending = true;
+      await OverlayControl.requestPermission();
+    }
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -263,6 +339,41 @@ class SettingsPage extends StatelessWidget {
                   'Off: they collapse until you tap one.'),
               value: config.showTechnical,
               onChanged: (v) => config.setShowTechnical(v),
+            ),
+          ),
+          const SizedBox(height: 20),
+          Text('Overlay', style: Theme.of(context).textTheme.titleMedium),
+          const SizedBox(height: 8),
+          Card(
+            child: Column(
+              children: [
+                SwitchListTile(
+                  secondary: const Icon(Icons.bubble_chart_outlined),
+                  title: const Text('Floating assistant'),
+                  subtitle: Text(_overlaySupported
+                      ? 'A handle over other apps: ask Hermes by text, voice '
+                          'or photo without leaving the screen. Keeps a quiet '
+                          'notification while on.'
+                      : 'Not available on this device.'),
+                  value: _overlaySupported && config.overlayEnabled,
+                  onChanged: _overlaySupported ? _toggleOverlay : null,
+                ),
+                const Divider(height: 1),
+                ListTile(
+                  enabled: _overlaySupported,
+                  leading: const Icon(Icons.layers_outlined),
+                  title: const Text('Draw over other apps'),
+                  subtitle: Text(_overlayPermission
+                      ? 'Granted'
+                      : 'Not granted — required for the floating assistant'),
+                  trailing: _overlayPermission
+                      ? Icon(Icons.check_circle, color: scheme.primary)
+                      : const Icon(Icons.chevron_right),
+                  onTap: _overlayPermission
+                      ? null
+                      : () => OverlayControl.requestPermission(),
+                ),
+              ],
             ),
           ),
           const SizedBox(height: 20),
