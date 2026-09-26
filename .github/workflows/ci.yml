@@ -31,10 +31,20 @@ jobs:
         # A drop below the floor (someone deleting tests) fails here.
         # `set -o pipefail` matters: without it `flutter test | tee` reports tee's
         # exit status and a failing suite would go green.
+        #
+        # The count must be read from the *suite summary*, never from a bare
+        # `\+[0-9]+`. On a fresh CI checkout `flutter test` re-resolves
+        # dependencies into the same stream, and those lines carry semver build
+        # metadata — the last match of the old regex was `image_picker_ios
+        # 0.8.13+8`, so the gate read "8" while 26 tests had just passed and
+        # failed the release on a green suite. Both reporter summaries are
+        # accepted (non-TTY CI prints "🎉 N tests passed.", a TTY prints
+        # "+N: All tests passed!"); neither can be confused with a version.
         run: |
           set -o pipefail
           flutter test 2>&1 | tee /tmp/flutter-test.log
-          count=$(grep -oE '\+[0-9]+' /tmp/flutter-test.log | tail -1 | tr -d '+')
+          count=$(grep -oE '([0-9]+) tests passed|\+([0-9]+): All tests passed' /tmp/flutter-test.log \
+                  | grep -oE '[0-9]+' | sort -n | tail -1)
           echo "flutter tests passed: ${count:-0}"
           if [ -z "$count" ] || [ "$count" -lt 24 ]; then
             echo "::error::expected at least 24 passing Flutter tests, saw '${count:-0}'"
