@@ -256,9 +256,27 @@ def _listed_profiles() -> list[str | None]:
     return out
 
 
+def _owner_candidates() -> list[str | None]:
+    """Profiles a chat can belong to: the listed ones, plus every linked project's
+    agent (a project chat lives in that agent's own state.db)."""
+    out = _listed_profiles()
+    try:
+        registry = json.loads((HERMES / "mercury" / "projects.json").read_text()).get("projects", [])
+    except (OSError, ValueError):
+        registry = []
+    for p in registry:
+        try:
+            name = named_profile(p.get("profile"))
+        except ValueError:
+            continue
+        if name and name not in out:
+            out.append(name)
+    return out
+
+
 def _session_owner(session_id: str) -> str:
     """The profile whose state.db holds this session ("default" if none does)."""
-    for prof in reversed(_listed_profiles()):
+    for prof in reversed(_owner_candidates()):
         path = _profile_db_path(prof)
         if not path.exists():
             continue

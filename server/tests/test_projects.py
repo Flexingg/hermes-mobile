@@ -218,3 +218,18 @@ def test_the_bridge_never_acts_for_hermes():
     for forbidden in (r"issue['\"]?,\s*['\"]create", r"gh issue create", r"kanban['\"]?,\s*['\"]create",
                       r"pr['\"]?,\s*['\"]create", r"os\.kill\(", r"\.send_signal\("):
         assert not re.search(forbidden, src), forbidden
+
+
+def test_project_chats_are_read_from_the_project_agents_db(client, mercury, tmp_path, monkeypatch):
+    """A Plan chat lives in dev-<repo>/state.db: opening it must read that db."""
+    monkeypatch.setattr(bridge, "PROFILES_DIR", tmp_path / "profiles")
+    _make_full_db(bridge.STATE_DB).close()
+    db = tmp_path / "profiles" / "dev-lumen-launcher" / "state.db"
+    db.parent.mkdir(parents=True)
+    con = _make_full_db(db)
+    con.execute("INSERT INTO sessions (id, source, title) VALUES ('plan9','api_server','plan')")
+    con.execute("INSERT INTO messages (session_id, role, content, timestamp) VALUES ('plan9','user','fasting card',1)")
+    con.commit()
+    msgs = client.get("/api/v1/sessions/plan9/messages", headers=auth()).json()
+    assert [m["text"] for m in msgs] == ["fasting card"]
+    assert bridge._session_owner("plan9") == "dev-lumen-launcher"
