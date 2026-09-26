@@ -38,9 +38,20 @@ def detect_gates(path: Path) -> str:
         return "./gradlew --no-daemon --max-workers=2 testDebugUnitTest"
     if (path / "package.json").exists():
         return "npm test"
-    if (path / "pyproject.toml").exists() or (path / "pytest.ini").exists() or (path / "tests").is_dir():
+    if (path / "pytest.ini").exists() or (path / "conftest.py").exists() or \
+            "[tool.pytest" in _read(path / "pyproject.toml") or "[tool:pytest]" in _read(path / "setup.cfg"):
         return "python3 -m pytest -q"
+    if (path / "tests").is_dir() or any(path.glob("test_*.py")):
+        # no pytest configuration: stdlib unittest runs test_*.py without extra packages
+        return "python3 -m unittest discover -q" + (" -s tests" if (path / "tests").is_dir() else "")
     return ""
+
+
+def _read(path: Path) -> str:
+    try:
+        return path.read_text(encoding="utf-8", errors="ignore")
+    except OSError:
+        return ""
 
 
 def _remote_matches(path: Path, repo: str) -> bool:
@@ -118,6 +129,11 @@ def ensure_board_and_project(pid: str, name: str, path: Path) -> None:
         hermes("project", "add-folder", pid, str(path), "--primary")
 
 
+def ensure_board_workdir(pid: str, path: Path) -> None:
+    """Backstop: a worktree task that somehow lacks a project path still has a repo."""
+    hermes("kanban", "boards", "set-default-workdir", pid, str(path))
+
+
 def cmd_link(a) -> int:
     repo = a.repo.strip()
     if not REPO_RE.match(repo):
@@ -146,6 +162,7 @@ def cmd_link(a) -> int:
     prev = existing.get(pid, {})
     profile, created = ensure_profile(a.profile or prev.get("profile") or f"dev-{pid}", repo)
     ensure_board_and_project(pid, name, path)
+    ensure_board_workdir(pid, path)
     gh("label", "create", "mercury", "-R", repo, "--color", "5319E7",
        "--description", "Queued for Hermes via Mercury", check=False)
     skills = install_worker_skills(profile)

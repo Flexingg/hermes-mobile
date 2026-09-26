@@ -65,12 +65,14 @@ def cmd_publish(a) -> int:
     if not notes:
         raise MercuryError("publish needs --notes: what changed, and what was and wasn't verified")
 
+    # the task title is "#<n> <issue title>"; the commit adds "(#n)" itself
+    title = re.sub(r"^#\d+\s+", "", a.title.strip()) or a.title.strip()
     files = changed_files(worktree)
     skipped = [f for f in files if NEVER_COMMIT.search(f)]
     stage = [f for f in files if f not in skipped]
     if stage:
         git(worktree, "add", "--", *stage)
-        message = a.title.strip() + (f" (#{number})" if number else "")
+        message = title + (f" (#{number})" if number else "")
         if number:
             message += f"\n\nCloses #{number}"
         git(worktree, "commit", "-m", message)
@@ -92,7 +94,7 @@ def cmd_publish(a) -> int:
             body += f"\n\nCloses #{number}"
         body += f"\n\n---\nShipped by Hermes via Mercury · coder: {a.coder or project.get('coder', 'claude')}"
         out = gh("pr", "create", "-R", project["repo"], "--base", base, "--head", branch,
-                 "--title", a.title.strip(), "--body-file", "-", input=body)
+                 "--title", title, "--body-file", "-", input=body)
         m = _PR_URL_RE.search(out.stdout or "")
         if not m:
             raise MercuryError(f"gh did not return a PR URL: {(out.stdout or '')[-200:]}")

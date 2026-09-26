@@ -26,7 +26,8 @@ d = Path(os.environ["FAKE_DIR"])
 argv = sys.argv[1:]
 stdin = "" if sys.stdin.isatty() else sys.stdin.read()
 with open(d / "calls.jsonl", "a") as fh:
-    fh.write(json.dumps({"tool": Path(sys.argv[0]).name, "argv": argv, "stdin": stdin}) + "\n")
+    fh.write(json.dumps({"tool": Path(sys.argv[0]).name, "argv": argv, "stdin": stdin,
+                         "hermes_home": os.environ.get("HERMES_HOME")}) + "\n")
 rules = json.loads((d / "responses.json").read_text()) if (d / "responses.json").exists() else []
 tool = Path(sys.argv[0]).name
 best = None

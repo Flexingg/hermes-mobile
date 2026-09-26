@@ -93,15 +93,22 @@ def test_link_rejects_bad_input(env):
     assert rc == 1 and "coder" in out["error"]
 
 
-@pytest.mark.parametrize("marker,expected", [
-    ("pubspec.yaml", "flutter analyze && flutter test"),
-    ("gradlew", "./gradlew --no-daemon --max-workers=2 testDebugUnitTest"),
-    ("package.json", "npm test"),
-    ("pyproject.toml", "python3 -m pytest -q"),
+@pytest.mark.parametrize("files,expected", [
+    ({"pubspec.yaml": ""}, "flutter analyze && flutter test"),
+    ({"gradlew": ""}, "./gradlew --no-daemon --max-workers=2 testDebugUnitTest"),
+    ({"package.json": ""}, "npm test"),
+    ({"pyproject.toml": "[tool.pytest.ini_options]\n", "tests/test_a.py": ""}, "python3 -m pytest -q"),
+    ({"conftest.py": ""}, "python3 -m pytest -q"),
+    ({"test_calc.py": ""}, "python3 -m unittest discover -q"),   # the sandbox's layout
+    ({"tests/test_a.py": ""}, "python3 -m unittest discover -q -s tests"),
+    ({"pyproject.toml": "[project]\n"}, ""),
+    ({"README.md": ""}, ""),
 ])
-def test_gates_are_detected_from_the_repo(tmp_path, marker, expected):
+def test_gates_are_detected_from_the_repo(tmp_path, files, expected):
     import mercury_project
-    (tmp_path / marker).write_text("")
+    for name, text in files.items():
+        (tmp_path / name).parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / name).write_text(text)
     assert mercury_project.detect_gates(tmp_path) == expected
 
 
@@ -308,8 +315,10 @@ def test_publish_stages_named_files_pushes_and_opens_the_pr(env, shipped):
     env.respond("gh", ["pr", "list"], "[]")
     env.respond("gh", ["pr", "create"], "https://github.com/Flexingg/demo/pull/9\n")
     rc, out = env.run("mercury_ship.py", "publish", "--project", "demo", "--task", "t_abc", "--worktree",
-                      str(wt), "--title", "Add a fasting card", "--notes", str(notes), "--coder", "claude")
+                      str(wt), "--title", "#42 Add a fasting card", "--notes", str(notes), "--coder", "claude")
     assert rc == 0, out
+    pr_args = env.called("gh", "pr", "create")[0]["argv"]
+    assert pr_args[pr_args.index("--title") + 1] == "Add a fasting card"  # no "#42 " prefix twice
     assert out["committed"] == ["app.txt"] and set(out["notCommitted"]) == {"data/transactions.json", ".env"}
     assert git(shipped["origin"], "log", "-1", "--format=%s%n%b", "demo/t_abc-fix", env=e).splitlines()[0] \
         == "Add a fasting card (#42)"
@@ -595,3 +604,26 @@ def test_link_repoints_a_project_whose_primary_moved(env, repo):
     rc, out = env.run("mercury_project.py", "link", "Flexingg/demo")
     assert rc == 0, out
     assert env.called("hermes", "project", "add-folder", "demo", str(repo["main"]), "--primary")
+
+
+def test_hermes_always_runs_as_the_default_profile(env):
+    """The Plan agent files issues with HERMES_HOME=profiles/dev-x; projects are per
+    profile, so kanban must still see the default profile's project (live finding)."""
+    env.project()
+    _issue_fakes(env)
+    rc, out = env.run("mercury_issue.py", "file", "--project", "demo", "--draft", "-", stdin=json.dumps(DRAFT),
+                      HERMES_HOME=str(env.root / "profiles" / "dev-demo"))
+    assert rc == 0, out
+    homes = {c["hermes_home"] for c in env.calls("hermes")}
+    assert homes == {str(env.root)}
+
+
+def test_link_sets_the_board_workdir(env, repo):
+    _gh_repo_view(env)
+    _installed_skills(env)
+    git(repo["main"], "remote", "set-url", "origin", "git@github.com:Flexingg/demo.git", env=repo["env"])
+    (env.root / "profiles" / "dev-demo").mkdir(parents=True)
+    (env.root / "profiles" / "dev-demo" / "config.yaml").write_text("{}")
+    env.respond("hermes", ["project", "show"], rc=1)
+    assert env.run("mercury_project.py", "link", "Flexingg/demo")[0] == 0
+    assert env.called("hermes", "kanban", "boards", "set-default-workdir", "demo", str(repo["main"]))

@@ -74,7 +74,11 @@ def gh(*args: str, timeout: int = 60, check: bool = True, input: str | None = No
 
 
 def hermes(*args: str, timeout: int = 120, check: bool = True) -> subprocess.CompletedProcess:
-    return run([HERMES, *args], timeout=timeout, check=check)
+    """Always as the default profile. Projects are per profile in Hermes, so a
+    project agent (HERMES_HOME=profiles/dev-x) creating a --project task would
+    otherwise find no project, and the task would get no worktree."""
+    return run([HERMES, *args], timeout=timeout, check=check,
+               env=real_env({"HERMES_HOME": str(HERMES_ROOT)}))
 
 
 # -- JSON files -------------------------------------------------------------------
