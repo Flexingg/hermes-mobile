@@ -2,15 +2,15 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import '../../core/config/app_config.dart';
-import '../../core/overlay/overlay_control.dart';
 import '../../data/api_failure.dart';
 import '../../data/hermes_repository.dart';
 import '../../data/models.dart';
 import '../chat/input_actions.dart';
+import 'ask_control.dart';
 import 'assistant_bar.dart';
 import 'assistant_session.dart';
 
-/// Entrypoint of the floating assistant's engine (started by OverlayService).
+/// Entrypoint of the ask bar's engine (started by AskActivity).
 ///
 /// This is a separate Flutter engine with its own isolate: it cannot see the
 /// main app's [AppState] or providers, so it reads [AppConfig] itself and
@@ -18,17 +18,20 @@ import 'assistant_session.dart';
 @pragma('vm:entry-point')
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
+  // Both are read before the first frame, so a prefill is in the field when the
+  // bar appears instead of popping in a frame later.
   final link = await _readLink();
-  runApp(AssistantOverlayApp(initial: link));
+  final args = await AskControl.args();
+  runApp(AskApp(initial: link, args: args));
 }
 
-/// What the overlay needs to talk to Hermes; [repo] is null with no server.
-typedef OverlayLink = ({AppConfig config, HermesRepository? repo});
+/// What the ask bar needs to talk to Hermes; [repo] is null with no server.
+typedef AskLink = ({AppConfig config, HermesRepository? repo});
 
 /// Reads the saved server + token. The main app writes these from another
 /// isolate, so the prefs cache is reloaded first — otherwise a server changed
-/// in the app would never reach an overlay that was already running.
-Future<OverlayLink> _readLink() async {
+/// in the app would not reach a bar opened in the same process.
+Future<AskLink> _readLink() async {
   await (await SharedPreferences.getInstance()).reload();
   final config = await AppConfig.load();
   if (!config.hasServer) return (config: config, repo: null);
@@ -43,23 +46,31 @@ Future<OverlayLink> _readLink() async {
 /// forever (the same budget as the main app's send watchdog).
 const _replyTimeout = Duration(seconds: 150);
 
-class AssistantOverlayApp extends StatefulWidget {
-  final OverlayLink initial;
-  const AssistantOverlayApp({super.key, required this.initial});
+class AskApp extends StatefulWidget {
+  final AskLink initial;
+
+  /// How the intent asked the bar to open. Opening never sends anything.
+  final AskArgs args;
+
+  const AskApp({super.key, required this.initial, this.args = const AskArgs()});
 
   @override
-  State<AssistantOverlayApp> createState() => _AssistantOverlayAppState();
+  State<AskApp> createState() => _AskAppState();
 }
 
-class _AssistantOverlayAppState extends State<AssistantOverlayApp> {
+class _AskAppState extends State<AskApp> {
   late AppConfig _config = widget.initial.config;
   late HermesRepository? _repo = widget.initial.repo;
+  late AskArgs _args = widget.args;
   bool _authFailed = false;
-  bool _expanded = false;
   bool _busy = false;
   String _question = '';
   String _reply = '';
   String? _error;
+
+  /// Voice mode listens only once the probe says the server is usable: a
+  /// microphone going live over a "not connected" bar would record for nothing.
+  bool _listen = false;
 
   /// The dedicated session, once resolved for the current server.
   String? _sessionId;
@@ -69,12 +80,27 @@ class _AssistantOverlayAppState extends State<AssistantOverlayApp> {
   @override
   void initState() {
     super.initState();
-    OverlayWindow.listen(
-      onConfigChanged: _reload,
-      onCollapsed: () {
-        if (mounted) setState(() => _expanded = false);
-      },
-    );
+    AskControl.listen(_onArgs);
+    _open();
+  }
+
+  Future<void> _open() async {
+    await _probe();
+    if (mounted) setState(() => _listen = _args.voice && _connected);
+  }
+
+  /// The intent fired again while the bar was open: take the new prefill, and
+  /// for voice re-arm the listen (the bar starts one per false→true flip).
+  Future<void> _onArgs(AskArgs args) async {
+    if (!mounted) return;
+    setState(() {
+      _args = args;
+      _listen = false;
+    });
+    // Let the bar see the false before the next true, or the flip is lost.
+    await WidgetsBinding.instance.endOfFrame;
+    await _reload();
+    await _open();
   }
 
   Future<void> _reload() async {
@@ -91,14 +117,6 @@ class _AssistantOverlayAppState extends State<AssistantOverlayApp> {
         _error = null;
       }
     });
-  }
-
-  Future<void> _expand() async {
-    await OverlayWindow.setExpanded(true);
-    if (!mounted) return;
-    setState(() => _expanded = true);
-    await _reload();
-    await _probe();
   }
 
   /// A stale token must show up as "not connected" when the bar opens, not as
@@ -121,18 +139,11 @@ class _AssistantOverlayAppState extends State<AssistantOverlayApp> {
     }
   }
 
-  Future<void> _collapse() async {
-    await OverlayWindow.setExpanded(false);
-    if (mounted) setState(() => _expanded = false);
-  }
-
   Future<String> _ensureSession(HermesRepository repo) async {
     final cached = _sessionId;
     if (cached != null) return cached;
-    final before = _config.assistantSessionId;
-    final id = await AssistantSession.ensure(config: _config, repo: repo);
-    if (id != before) await OverlayWindow.reportSessionCreated(id);
-    return _sessionId = id;
+    // The main app's chat list picks a new session up when it next resumes.
+    return _sessionId = await AssistantSession.ensure(config: _config, repo: repo);
   }
 
   void _fail(Object e) {
@@ -179,6 +190,8 @@ class _AssistantOverlayAppState extends State<AssistantOverlayApp> {
     }
   }
 
+  // AskActivity is a real activity, so image_picker launches the camera from it
+  // and gets the photo back through it — no host activity to lend or attach.
   Future<void> _camera(String caption) async {
     final repo = _repo;
     if (repo == null || _busy) return;
@@ -188,12 +201,10 @@ class _AssistantOverlayAppState extends State<AssistantOverlayApp> {
     });
     Attachment? attachment;
     try {
-      await OverlayWindow.attachHost();
       attachment = await captureAndUpload(repo);
     } catch (e) {
       _fail(e);
     } finally {
-      await OverlayWindow.detachHost();
       if (mounted) setState(() => _busy = false);
     }
     if (attachment != null) await _send(caption, attachments: [attachment]);
@@ -210,70 +221,52 @@ class _AssistantOverlayAppState extends State<AssistantOverlayApp> {
       debugShowCheckedModeBanner: false,
       theme: theme(Brightness.light),
       darkTheme: theme(Brightness.dark),
+      // No Scaffold and no opaque Material anywhere up to the bar: the window is
+      // transparent so the app underneath stays visible, and any painted
+      // background here would cover it again.
       home: Material(
         type: MaterialType.transparency,
-        child: LayoutBuilder(builder: (context, box) {
-          // The window is resized natively; until the new size arrives the
-          // bar must not try to lay out inside the 56dp handle.
-          if (!_expanded || box.maxWidth < 200) {
-            return _Handle(onTap: _expand);
-          }
-          return GestureDetector(
-            behavior: HitTestBehavior.opaque,
-            onTap: _collapse,
-            child: Padding(
-              padding: EdgeInsets.fromLTRB(
-                  8, 8, 8, 8 + MediaQuery.viewInsetsOf(context).bottom),
-              child: Align(
-                alignment: Alignment.bottomCenter,
-                child: ConstrainedBox(
-                  constraints: const BoxConstraints(maxWidth: 560),
-                  // Taps on the bar itself must not fall through to collapse.
-                  child: GestureDetector(
-                    onTap: () {},
-                    child: AssistantAskBar(
-                      connected: _connected,
-                      busy: _busy,
-                      question: _question,
-                      reply: _reply,
-                      error: _error,
-                      onSend: _send,
-                      onCamera: _camera,
-                      onDismiss: _collapse,
-                      onOpenApp: OverlayWindow.openApp,
+        child: PopScope(
+          canPop: false,
+          // Back closes the bar (and the activity), back to the app underneath.
+          onPopInvokedWithResult: (didPop, _) {
+            if (!didPop) AskControl.finish();
+          },
+          child: Builder(builder: (context) {
+            // The window is full-screen, so a tap outside the bar lands here
+            // and not on the (paused) app underneath: treat it as "close".
+            return GestureDetector(
+              behavior: HitTestBehavior.opaque,
+              onTap: AskControl.finish,
+              child: Padding(
+                padding: EdgeInsets.fromLTRB(
+                    8, 8, 8, 8 + MediaQuery.viewInsetsOf(context).bottom),
+                child: Align(
+                  alignment: Alignment.bottomCenter,
+                  child: ConstrainedBox(
+                    constraints: const BoxConstraints(maxWidth: 560),
+                    // Taps on the bar itself must not fall through to close.
+                    child: GestureDetector(
+                      onTap: () {},
+                      child: AssistantAskBar(
+                        connected: _connected,
+                        busy: _busy,
+                        question: _question,
+                        reply: _reply,
+                        error: _error,
+                        initialText: _args.text,
+                        autostartVoice: _listen,
+                        onSend: _send,
+                        onCamera: _camera,
+                        onDismiss: AskControl.finish,
+                        onOpenApp: AskControl.openApp,
+                      ),
                     ),
                   ),
                 ),
               ),
-            ),
-          );
-        }),
-      ),
-    );
-  }
-}
-
-/// The collapsed state: a small round handle at the screen edge.
-class _Handle extends StatelessWidget {
-  final VoidCallback onTap;
-  const _Handle({required this.onTap});
-
-  @override
-  Widget build(BuildContext context) {
-    final scheme = Theme.of(context).colorScheme;
-    return Center(
-      child: Material(
-        color: scheme.primaryContainer,
-        shape: const CircleBorder(),
-        elevation: 4,
-        child: InkWell(
-          customBorder: const CircleBorder(),
-          onTap: onTap,
-          child: SizedBox(
-            width: 48,
-            height: 48,
-            child: Icon(Icons.auto_awesome, color: scheme.onPrimaryContainer),
-          ),
+            );
+          }),
         ),
       ),
     );

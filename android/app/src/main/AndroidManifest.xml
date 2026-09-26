@@ -5,12 +5,6 @@
     <uses-permission android:name="android.permission.RECORD_AUDIO"/>
     <!-- "Install APK" on a ready PR opens the system installer (the user confirms). -->
     <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES"/>
-    <!-- The floating assistant: a handle drawn over other apps by a foreground
-         service (specialUse; microphone for tap-to-talk while it is showing). -->
-    <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW"/>
-    <uses-permission android:name="android.permission.FOREGROUND_SERVICE"/>
-    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE"/>
-    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE"/>
     <application
         android:label="Mercury Messenger"
         android:name="${applicationName}"
@@ -32,28 +26,40 @@
               android:name="io.flutter.embedding.android.NormalTheme"
               android:resource="@style/NormalTheme"
               />
+            <!-- Static shortcuts need no runtime code: the launcher reads them and shows them in
+                 the icon's long-press menu, draggable to the home screen. -->
+            <meta-data
+                android:name="android.app.shortcuts"
+                android:resource="@xml/shortcuts" />
             <intent-filter>
                 <action android:name="android.intent.action.MAIN"/>
                 <category android:name="android.intent.category.LAUNCHER"/>
             </intent-filter>
         </activity>
-        <service
-            android:name=".OverlayService"
-            android:exported="false"
-            android:stopWithTask="false"
-            android:foregroundServiceType="specialUse|microphone">
-            <property
-                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
-                android:value="assistant_overlay"/>
-        </service>
-        <!-- Lent to the overlay engine while the camera runs (image_picker
-             needs an activity to launch from and to return the photo to). -->
+        <!-- The ask bar, on demand (res/xml/shortcuts.xml, Tasker, adb): a translucent
+             activity over the current app instead of a standing overlay. Not noHistory:
+             image_picker starts the camera on top of it, and it has to survive to get
+             the photo back. -->
         <activity
-            android:name=".OverlayHostActivity"
-            android:exported="false"
+            android:name=".AskActivity"
+            android:exported="true"
+            android:launchMode="singleTop"
             android:excludeFromRecents="true"
             android:taskAffinity=""
-            android:theme="@android:style/Theme.Translucent.NoTitleBar"/>
+            android:theme="@style/AskLaunchTheme"
+            android:configChanges="orientation|keyboardHidden|keyboard|screenSize|smallestScreenSize|locale|layoutDirection|fontScale|screenLayout|density|uiMode"
+            android:hardwareAccelerated="true"
+            android:windowSoftInputMode="adjustResize">
+            <meta-data
+                android:name="io.flutter.embedding.android.NormalTheme"
+                android:resource="@style/AskNormalTheme" />
+            <!-- The documented Tasker/adb entry point: any app may open the bar, prefill it and
+                 start listening. Nothing here can send without a tap in the bar. -->
+            <intent-filter>
+                <action android:name="com.randalls.hermes_mobile.action.ASK" />
+                <category android:name="android.intent.category.DEFAULT" />
+            </intent-filter>
+        </activity>
         <provider
             android:name="androidx.core.content.FileProvider"
             android:authorities="${applicationId}.mercury.files"

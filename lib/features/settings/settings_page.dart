@@ -1,9 +1,7 @@
-import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import '../../core/config/app_config.dart';
 import '../../core/notifications/push.dart';
-import '../../core/overlay/overlay_control.dart';
 import '../../core/theme/app_theme.dart';
 import '../../state/app_state.dart';
 import 'bots_page.dart';
@@ -30,76 +28,7 @@ class SettingsPage extends StatefulWidget {
   State<SettingsPage> createState() => _SettingsPageState();
 }
 
-class _SettingsPageState extends State<SettingsPage> with WidgetsBindingObserver {
-  bool _overlaySupported = true;
-  bool _overlayPermission = false;
-
-  /// The user switched the assistant on without the permission: finish the
-  /// job when they come back from system Settings having granted it.
-  bool _overlayPending = false;
-  StreamSubscription<void>? _overlayStopped;
-
-  @override
-  void initState() {
-    super.initState();
-    WidgetsBinding.instance.addObserver(this);
-    // The notification's "Turn off" stops the service behind the app's back.
-    _overlayStopped = OverlayControl.stopped.listen((_) {
-      if (mounted) context.read<AppConfig>().setOverlayEnabled(false);
-    });
-    _refreshOverlay();
-  }
-
-  @override
-  void dispose() {
-    WidgetsBinding.instance.removeObserver(this);
-    _overlayStopped?.cancel();
-    super.dispose();
-  }
-
-  @override
-  void didChangeAppLifecycleState(AppLifecycleState state) {
-    // The permission is granted in system Settings, outside the app: the tile
-    // has to re-check when the user returns, not only when the page opens.
-    if (state == AppLifecycleState.resumed) _refreshOverlay();
-  }
-
-  Future<void> _refreshOverlay() async {
-    final config = context.read<AppConfig>();
-    final supported = await OverlayControl.isSupported();
-    final granted = supported && await OverlayControl.hasPermission();
-    if (!mounted) return;
-    setState(() {
-      _overlaySupported = supported;
-      _overlayPermission = granted;
-    });
-    if (_overlayPending) {
-      _overlayPending = false;
-      if (granted) await _startOverlay(config);
-    }
-  }
-
-  Future<void> _startOverlay(AppConfig config) async {
-    await OverlayControl.start();
-    await config.setOverlayEnabled(true);
-  }
-
-  Future<void> _toggleOverlay(bool on) async {
-    final config = context.read<AppConfig>();
-    if (!on) {
-      _overlayPending = false;
-      await OverlayControl.stop();
-      await config.setOverlayEnabled(false);
-      return;
-    }
-    if (await OverlayControl.hasPermission()) {
-      await _startOverlay(config);
-    } else {
-      _overlayPending = true;
-      await OverlayControl.requestPermission();
-    }
-  }
-
+class _SettingsPageState extends State<SettingsPage> {
   @override
   Widget build(BuildContext context) {
     final config = context.watch<AppConfig>();
@@ -342,40 +271,9 @@ class _SettingsPageState extends State<SettingsPage> with WidgetsBindingObserver
             ),
           ),
           const SizedBox(height: 20),
-          Text('Overlay', style: Theme.of(context).textTheme.titleMedium),
+          Text('Quick ask', style: Theme.of(context).textTheme.titleMedium),
           const SizedBox(height: 8),
-          Card(
-            child: Column(
-              children: [
-                SwitchListTile(
-                  secondary: const Icon(Icons.bubble_chart_outlined),
-                  title: const Text('Floating assistant'),
-                  subtitle: Text(_overlaySupported
-                      ? 'A handle over other apps: ask Hermes by text, voice '
-                          'or photo without leaving the screen. Keeps a quiet '
-                          'notification while on.'
-                      : 'Not available on this device.'),
-                  value: _overlaySupported && config.overlayEnabled,
-                  onChanged: _overlaySupported ? _toggleOverlay : null,
-                ),
-                const Divider(height: 1),
-                ListTile(
-                  enabled: _overlaySupported,
-                  leading: const Icon(Icons.layers_outlined),
-                  title: const Text('Draw over other apps'),
-                  subtitle: Text(_overlayPermission
-                      ? 'Granted'
-                      : 'Not granted — required for the floating assistant'),
-                  trailing: _overlayPermission
-                      ? Icon(Icons.check_circle, color: scheme.primary)
-                      : const Icon(Icons.chevron_right),
-                  onTap: _overlayPermission
-                      ? null
-                      : () => OverlayControl.requestPermission(),
-                ),
-              ],
-            ),
-          ),
+          const Card(child: _QuickAskHelp()),
           const SizedBox(height: 20),
           Text('Notifications', style: Theme.of(context).textTheme.titleMedium),
           const SizedBox(height: 8),
@@ -502,3 +400,61 @@ class _SegRow<T> extends StatelessWidget {
   }
 }
 
+/// How to open the ask bar from outside the app. There is nothing to switch
+/// on: the launcher shortcuts and the exported intent are always there, and
+/// opening the bar never sends anything — a send is always a tap in the bar.
+class _QuickAskHelp extends StatelessWidget {
+  const _QuickAskHelp();
+
+  // The applicationId, not the Kotlin package: the class has to be spelled out
+  // in full, or ".AskActivity" resolves inside the wrong package.
+  static const _adb = 'adb shell am start '
+      '-a com.randalls.hermes_mobile.action.ASK '
+      '-n com.randallengineering.hermes/com.randalls.hermes_mobile.AskActivity';
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    final text = Theme.of(context).textTheme;
+    final mono = text.bodySmall?.copyWith(fontFamily: 'monospace');
+    return Padding(
+      padding: const EdgeInsets.all(16),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(children: [
+            Icon(Icons.auto_awesome, color: scheme.primary),
+            const SizedBox(width: 12),
+            Expanded(
+              child: Text('Ask Hermes over any app', style: text.titleSmall),
+            ),
+          ]),
+          const SizedBox(height: 8),
+          const Text(
+              'Long-press the Mercury icon for Ask Mercury and Ask by voice; '
+              'drag either to the home screen. Anything else — Tasker, a '
+              'gesture, a quick tile, a side button, a voice command — can '
+              'fire the same intent. Opening the bar never sends anything: a '
+              'send is always a tap in the bar.'),
+          const SizedBox(height: 12),
+          Text('Tasker', style: text.labelLarge),
+          const SizedBox(height: 4),
+          SelectableText(
+              'Task → Send Intent\n'
+              'Action: com.randalls.hermes_mobile.action.ASK\n'
+              'Package: com.randallengineering.hermes\n'
+              'Class: com.randalls.hermes_mobile.AskActivity\n'
+              'Extra: mode:voice  (or mode:text and text:<your question>)\n'
+              'Target: Activity',
+              style: mono),
+          const SizedBox(height: 12),
+          Text('adb (to try it without Tasker)', style: text.labelLarge),
+          const SizedBox(height: 4),
+          SelectableText('$_adb --es mode voice', style: mono),
+          const SizedBox(height: 4),
+          SelectableText("$_adb --es text 'what is on my calendar'", style: mono),
+        ],
+      ),
+    );
+  }
+}

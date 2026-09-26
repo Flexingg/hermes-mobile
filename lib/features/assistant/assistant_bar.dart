@@ -4,9 +4,9 @@ import '../chat/input_actions.dart';
 /// The floating assistant's ask bar: the reply so far above a composer-shaped
 /// field with camera, voice and send.
 ///
-/// It holds no connection of its own — the overlay entrypoint passes the
-/// streamed [reply]/[error] in and does the sending — so it renders the same in
-/// a widget test as in the overlay window.
+/// It holds no connection of its own — the ask entrypoint passes the streamed
+/// [reply]/[error] in and does the sending — so it renders the same in a widget
+/// test as in AskActivity.
 class AssistantAskBar extends StatefulWidget {
   /// False when there is no usable server/token. The bar then says so instead
   /// of offering a send that could only fail.
@@ -17,7 +17,7 @@ class AssistantAskBar extends StatefulWidget {
   /// Takes a photo and sends it, with the typed text as its caption.
   final Future<void> Function(String caption)? onCamera;
 
-  /// Collapses back to the handle (the service keeps running).
+  /// Closes the bar, back to the app underneath.
   final VoidCallback? onDismiss;
 
   /// Opens the main app, offered when not connected.
@@ -35,6 +35,19 @@ class AssistantAskBar extends StatefulWidget {
   /// A turn is in flight.
   final bool busy;
 
+  /// Put in the field when the bar opens (and again when it changes, for a
+  /// second fire of the ask intent). Never sent: a send is always a tap.
+  final String initialText;
+
+  /// Start listening once, when this flips to true while [connected] — the
+  /// host only sets it after its connection probe, so the microphone never
+  /// goes live over a bar that could not send what it heard.
+  final bool autostartVoice;
+
+  /// Injected speech input (tests). When null the bar makes and disposes its
+  /// own; an injected one belongs to the caller and is never disposed here.
+  final VoiceInputController? voiceInput;
+
   const AssistantAskBar({
     super.key,
     required this.connected,
@@ -46,6 +59,9 @@ class AssistantAskBar extends StatefulWidget {
     this.reply = '',
     this.error,
     this.busy = false,
+    this.initialText = '',
+    this.autostartVoice = false,
+    this.voiceInput,
   });
 
   static const notConnectedText = 'not connected — open Mercury';
@@ -57,13 +73,38 @@ class AssistantAskBar extends StatefulWidget {
 class _AssistantAskBarState extends State<AssistantAskBar> {
   final _controller = TextEditingController();
   final _focus = FocusNode();
-  final _voiceInput = VoiceInputController();
+  late final VoiceInputController _voiceInput =
+      widget.voiceInput ?? VoiceInputController();
   String? _voiceError;
+
+  bool get _voiceArmed => widget.autostartVoice && widget.connected;
 
   @override
   void initState() {
     super.initState();
+    _controller.text = widget.initialText;
     _voiceInput.addListener(_onVoiceChanged);
+    // After the first frame: _voice() calls setState, and the mic button it
+    // animates has to exist first.
+    if (_voiceArmed) WidgetsBinding.instance.addPostFrameCallback((_) => _autostart());
+  }
+
+  @override
+  void didUpdateWidget(AssistantAskBar old) {
+    super.didUpdateWidget(old);
+    if (widget.initialText != old.initialText && widget.initialText.isNotEmpty) {
+      _controller.text = widget.initialText;
+    }
+    // Once per false→true flip, so a rebuild while armed can't stop (toggle)
+    // a listen that is already running.
+    final wasArmed = old.autostartVoice && old.connected;
+    if (_voiceArmed && !wasArmed) {
+      WidgetsBinding.instance.addPostFrameCallback((_) => _autostart());
+    }
+  }
+
+  void _autostart() {
+    if (mounted && _voiceArmed && !_voiceInput.listening) _voice();
   }
 
   void _onVoiceChanged() {
@@ -74,7 +115,8 @@ class _AssistantAskBarState extends State<AssistantAskBar> {
   void dispose() {
     _controller.dispose();
     _focus.dispose();
-    _voiceInput.dispose();
+    _voiceInput.removeListener(_onVoiceChanged);
+    if (widget.voiceInput == null) _voiceInput.dispose();
     super.dispose();
   }
 
@@ -95,10 +137,12 @@ class _AssistantAskBarState extends State<AssistantAskBar> {
       if (mounted) setState(() {});
     });
     if (!available && mounted) {
-      // The overlay can't show the permission prompt itself; the grant has to
-      // happen once from the app's own composer.
+      // The bar runs in a real activity, so the recognizer asks for the
+      // microphone itself; getting here means it was refused or there is no
+      // recognizer, and the bar says so rather than silently not listening.
       setState(() => _voiceError =
-          'Voice input is unavailable — allow the microphone in Mercury first.');
+          'Voice input is unavailable — the microphone was not allowed or '
+          'there is no speech recognizer.');
     }
   }
 
@@ -132,7 +176,7 @@ class _AssistantAskBarState extends State<AssistantAskBar> {
               ),
               IconButton(
                 icon: const Icon(Icons.close_rounded),
-                tooltip: 'Collapse',
+                tooltip: 'Close',
                 color: scheme.onSurfaceVariant,
                 onPressed: widget.onDismiss,
               ),

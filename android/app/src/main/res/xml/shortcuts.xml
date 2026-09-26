@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- The launcher's long-press menu on the Mercury icon. Both open the ask bar
+   (AskActivity) over the current screen; neither can send anything.
+   targetPackage is the applicationId (android/app/build.gradle.kts), not the
+   Kotlin namespace: resources get no ${applicationId} placeholder, and a
+   package that isn't installed makes the launcher say "App isn't installed".
+   The labels are string resources because shortcutShortLabel/shortcutLongLabel
+   are typed as an attribute reference: a literal here fails resource linking
+   ("'Ask Mercury' is incompatible with attribute shortcutShortLabel"). -->
+<shortcuts xmlns:android="http://schemas.android.com/apk/res/android">
+    <shortcut
+        android:shortcutId="ask"
+        android:enabled="true"
+        android:icon="@mipmap/ic_launcher"
+        android:shortcutShortLabel="@string/shortcut_ask_short"
+        android:shortcutLongLabel="@string/shortcut_ask_long">
+        <intent
+            android:action="com.randalls.hermes_mobile.action.ASK"
+            android:targetPackage="com.randallengineering.hermes"
+            android:targetClass="com.randalls.hermes_mobile.AskActivity">
+            <extra android:name="mode" android:value="text" />
+        </intent>
+    </shortcut>
+    <shortcut
+        android:shortcutId="ask_voice"
+        android:enabled="true"
+        android:icon="@mipmap/ic_launcher"
+        android:shortcutShortLabel="@string/shortcut_ask_voice_short"
+        android:shortcutLongLabel="@string/shortcut_ask_voice_long">
+        <intent
+            android:action="com.randalls.hermes_mobile.action.ASK"
+            android:targetPackage="com.randallengineering.hermes"
+            android:targetClass="com.randalls.hermes_mobile.AskActivity">
+            <extra android:name="mode" android:value="voice" />
+        </intent>
+    </shortcut>
+</shortcuts>

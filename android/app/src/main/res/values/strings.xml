@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- The launcher shortcuts (res/xml/shortcuts.xml). They have to be string
+         resources, not literals: shortcutShortLabel/shortcutLongLabel are typed
+         as an attribute *reference*, and a literal fails resource linking with
+         "'Ask Mercury' is incompatible with attribute shortcutShortLabel". -->
+    <string name="shortcut_ask_short">Ask Mercury</string>
+    <string name="shortcut_ask_long">Ask Mercury</string>
+    <string name="shortcut_ask_voice_short">Ask by voice</string>
+    <string name="shortcut_ask_voice_long">Ask by voice</string>
+</resources>

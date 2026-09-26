@@ -21,7 +21,6 @@ class AppConfig extends ChangeNotifier {
   static const _kServerBase = 'cfg_server_base';
   static const _kServerTokenRef = 'cfg_server_token_ref';
   static const _kAssistantSession = 'cfg_assistant_session';
-  static const _kOverlay = 'cfg_overlay';
 
   late ThemePreference _themePreference;
   late bool _dynamicColor;
@@ -37,7 +36,6 @@ class AppConfig extends ChangeNotifier {
   String? _serverBaseUrl;
   String? _serverTokenRef;
   String? _assistantSessionId;
-  bool _overlayEnabled = false;
 
   bool get dynamicColor => _dynamicColor;
   ThemePreference get themePreference => _themePreference;
@@ -55,13 +53,9 @@ class AppConfig extends ChangeNotifier {
   /// True once a server has been configured (connection may still be pending).
   bool get hasServer => _serverBaseUrl != null && _serverBaseUrl!.isNotEmpty;
 
-  /// The dedicated session the floating assistant posts into, so overlay turns
-  /// never land in a project chat or whatever thread was last open.
+  /// The dedicated session the ask bar posts into, so its turns never land in
+  /// a project chat or whatever thread was last open.
   String? get assistantSessionId => _assistantSessionId;
-
-  /// Whether the user switched the floating assistant on. Off by default: the
-  /// overlay draws over other apps and keeps a notification up while it runs.
-  bool get overlayEnabled => _overlayEnabled;
 
   static Future<AppConfig> load() async {
     final prefs = await SharedPreferences.getInstance();
@@ -81,7 +75,6 @@ class AppConfig extends ChangeNotifier {
     _serverBaseUrl = prefs.getString(_kServerBase);
     _serverTokenRef = prefs.getString(_kServerTokenRef);
     _assistantSessionId = prefs.getString(_kAssistantSession);
-    _overlayEnabled = prefs.getBool(_kOverlay) ?? false;
     final seed = prefs.getInt(_kSeed);
     _seedColor = seed == null ? null : Color(seed);
   }
@@ -199,13 +192,6 @@ class AppConfig extends ChangeNotifier {
     } else {
       await p.setString(_kAssistantSession, id);
     }
-  }
-
-  Future<void> setOverlayEnabled(bool value) async {
-    _overlayEnabled = value;
-    notifyListeners();
-    final p = await SharedPreferences.getInstance();
-    await p.setBool(_kOverlay, value);
   }
 
   /// Reset appearance + UI preferences to their defaults.
