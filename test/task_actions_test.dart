@@ -339,4 +339,66 @@ void main() {
       expect(msgs.single.sessionMeta['duration'], '19s');
     });
   });
+
+
+  group('test-first: a task parked before the push', () {
+    ProjectTask parked({String? apk = '/k/apks/local-abc-local.apk'}) =>
+        ProjectTask.fromJson({
+          'id': 't_park',
+          'title': '#7 Test it before the PR',
+          'phase': 'awaiting_push',
+          'issue': 7,
+          'issueUrl': 'https://github.com/Flexingg/hermes-mobile/issues/7',
+          'apk': apk,
+          'blockedReason': 'Built and waiting: test build ready for #7. Nothing has been pushed.',
+        });
+
+    test('is its own phase, and knows it can be pushed', () {
+      expect(TaskPhase.parse('awaiting_push'), TaskPhase.awaitingPush);
+      expect(TaskPhase.awaitingPush.wire, 'awaiting_push');
+      expect(TaskPhase.awaitingPush.isActive, isTrue); // still work, not finished
+      expect(TaskPhase.awaitingPush.isFinished, isFalse);
+      expect(parked().canPush, isTrue);
+      expect(parked().canRetry, isFalse);
+      expect(task('review').canPush, isFalse);
+      expect(parked().prUrl, isNull);
+    });
+
+    test('a read-only project view of one shows the policy in force', () {
+      final p = Project.fromJson({
+        'id': 'hermes-mobile', 'repo': 'Flexingg/hermes-mobile', 'profile': 'dev-hermes-mobile',
+        'pushPolicy': 'test-first',
+      });
+      expect(p.testsFirst, isTrue);
+      expect(p.pushPolicy, 'test-first');
+      expect(Project.fromJson({'id': 'x', 'repo': 'a/b', 'profile': 'p'}).testsFirst, isFalse);
+    });
+
+    testWidgets('offers the build to install and one tap to open the PR', (tester) async {
+      final (state, repo) = await stateWith();
+      final prj = Project.fromJson({
+        'id': 'hermes-mobile',
+        'name': 'hermes-mobile',
+        'repo': 'Flexingg/hermes-mobile',
+        'profile': 'dev-hermes-mobile',
+        'coder': 'claude',
+        'status': 'needs_you',
+        'counts': {'ready': 0, 'needs_you': 1, 'working': 0, 'queued': 0},
+      });
+      await pumpTall(tester, host(state, Scaffold(body: TaskCard(project: prj, task: parked()))));
+
+      expect(find.text('Built — not pushed'), findsOneWidget);
+      expect(find.byKey(const Key('install-t_park')), findsOneWidget);
+      expect(find.byKey(const Key('push-t_park')), findsOneWidget);
+      expect(find.byKey(const Key('push-t_park')), findsOneWidget);
+      // No PR exists yet, so there is nothing to open.
+      expect(find.text('Open PR'), findsNothing);
+
+      await tester.tap(find.byKey(const Key('push-t_park')));
+      await tester.pumpAndSettle();
+      expect(repo.intents.single['kind'], 'push_task');
+      expect(repo.intents.single['project'], 'hermes-mobile');
+      expect(repo.intents.single['payload'], {'task': 't_park'});
+    });
+  });
 }

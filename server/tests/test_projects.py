@@ -76,6 +76,47 @@ def test_needs_you_outranks_everything(client, mercury, tmp_path):
     assert client.get("/api/v1/projects", headers=auth()).json()[0]["status"] == "needs_you"
 
 
+def test_a_task_parked_before_the_push_shows_its_build_and_its_own_phase(client, mercury, tmp_path):
+    """test-first: the work is committed and built, and nothing is on GitHub yet.
+    The app must be able to offer that build, and must not call the task 'needs you'
+    as if something had gone wrong."""
+    _board(tmp_path, [("t_a", "blocked")])
+    apk = str(mercury / "apks" / "lumen-launcher" / "local-abc1234-local.apk")
+    _state(mercury, "t_a", phase="awaiting_push", headSha="abc1234", localApk=apk,
+           localApkSha="abc1234", blockedReason="Built and waiting", issue=3)
+    [p] = client.get("/api/v1/projects", headers=auth()).json()
+    assert p["status"] == "needs_you" and p["counts"]["needs_you"] == 1  # never silently idle
+    [t] = client.get("/api/v1/projects/lumen-launcher/tasks", headers=auth()).json()
+    assert t["phase"] == "awaiting_push" and t["prUrl"] is None
+    assert t["apk"] == apk  # the local build, because there is no CI to ask
+
+
+def test_a_parked_build_is_not_offered_when_it_is_for_another_commit(client, mercury, tmp_path):
+    _board(tmp_path, [("t_a", "blocked")])
+    _state(mercury, "t_a", phase="awaiting_push", headSha="new9999",
+           localApk=str(mercury / "apks" / "local-old-local.apk"), localApkSha="old1111")
+    [t] = client.get("/api/v1/projects/lumen-launcher/tasks", headers=auth()).json()
+    assert t["phase"] == "awaiting_push" and t["apk"] is None
+
+
+def test_a_local_build_never_stands_in_for_ci_on_a_task_in_review(client, mercury, tmp_path):
+    """The gates' own build is only the app's offer when nothing else can provide one:
+    a task in review waits for CI, exactly as before."""
+    _board(tmp_path, [("t_a", "review")])
+    _state(mercury, "t_a", phase="review", headSha="new9999", localApkSha="new9999",
+           localApk=str(mercury / "apks" / "local-old-local.apk"))
+    [t] = client.get("/api/v1/projects/lumen-launcher/tasks", headers=auth()).json()
+    assert t["phase"] == "review" and t["apk"] is None
+
+
+def test_the_project_view_says_how_it_pushes(client, mercury):
+    assert client.get("/api/v1/projects", headers=auth()).json()[0]["pushPolicy"] == "auto"
+    registry = json.loads((mercury / "projects.json").read_text())
+    registry["projects"][0]["pushPolicy"] = "test-first"
+    (mercury / "projects.json").write_text(json.dumps(registry))
+    assert client.get("/api/v1/projects", headers=auth()).json()[0]["pushPolicy"] == "test-first"
+
+
 def test_no_projects_is_an_empty_list(client, mercury):
     (mercury / "projects.json").unlink()
     assert client.get("/api/v1/projects", headers=auth()).json() == []
@@ -274,6 +315,85 @@ def test_plan_mode_turn_carries_the_plan_rules(client, api, monkeypatch):
     assert r.status_code == 400
 
 
+# -- Chat is not a place where code changes happen ---------------------------------
+# The whole design rests on Plan → issue → worker → PR. A chat with a project's
+# agent has the repo checked out and every tool, so without this it just does the
+# job itself and the flow is skipped.
+def _spawn_capture(monkeypatch):
+    spawned = []
+    monkeypatch.setattr(bridge, "_spawn_hermes", lambda sid, text, att, profile=None, system=None:
+                        spawned.append((sid, text, profile, system)))
+    return spawned
+
+
+def test_a_project_chat_turn_is_told_not_to_change_the_repo(client, mercury, monkeypatch):
+    spawned = _spawn_capture(monkeypatch)
+    r = client.post("/api/v1/sessions/c1/messages", headers=auth(),
+                    json={"text": "fix the fasting card rounding", "profile": "dev-lumen-launcher"})
+    assert r.status_code == 200, r.text
+    _sid, _text, _profile, system = spawned[0]
+    assert "Mercury Chat mode for project lumen-launcher" in system
+    assert "do NOT edit or create files" in system
+    assert "Plan mode" in system
+    # The exception the user asked for: an explicit in-chat instruction.
+    assert "explicit instruction to make the change" in system
+    # Byte-stable for the same project: prompt caching survives.
+    again = client.post("/api/v1/sessions/c1/messages", headers=auth(),
+                        json={"text": "and how?", "profile": "dev-lumen-launcher"})
+    assert again.status_code == 200
+    assert spawned[1][3] == system
+
+
+def test_a_plain_chat_is_told_the_flow_is_where_code_changes_go(client, mercury, monkeypatch):
+    """The orchestrator chat is a general assistant, so it gets the shorter note."""
+    spawned = _spawn_capture(monkeypatch)
+    r = client.post("/api/v1/sessions/c2/messages", headers=auth(),
+                    json={"text": "how's lumen doing?"})
+    assert r.status_code == 200, r.text
+    system = spawned[0][3]
+    assert "linked GitHub projects" in system and "never straight from this chat" in system
+    assert "Mercury Chat mode" not in system
+
+
+def test_plan_mode_keeps_its_own_message_and_chat_does_not_leak_into_it(client, mercury, monkeypatch):
+    spawned = _spawn_capture(monkeypatch)
+    client.post("/api/v1/sessions/p1/messages", headers=auth(),
+                json={"text": "plan it", "mode": "plan", "profile": "dev-lumen-launcher"})
+    _sid, text, _profile, system = spawned[0]
+    assert "READ-ONLY" in system and "issue-planner" in system
+    assert "Chat mode" not in system
+
+
+def test_a_named_project_that_is_not_linked_is_refused_for_a_chat_turn(client, mercury, monkeypatch):
+    _spawn_capture(monkeypatch)
+    r = client.post("/api/v1/sessions/c3/messages", headers=auth(),
+                    json={"text": "hi", "project": "nope", "profile": "dev-lumen-launcher"})
+    assert r.status_code == 404
+
+
+def test_a_group_chat_turn_carries_the_rule_too(monkeypatch):
+    """The group path runs `hermes chat -q`, which has no system-message flag, so the
+    rule rides in the text. It was the one remaining way to change code from a chat."""
+    sent = {}
+
+    class FakeProc:
+        stdout = None
+
+        def wait(self):
+            return 0
+
+    monkeypatch.setattr(bridge.subprocess, "Popen",
+                        lambda cmd, **kw: (sent.__setitem__("cmd", cmd), FakeProc())[1])
+    monkeypatch.setattr(bridge, "_broadcast", lambda *a, **k: None)
+    monkeypatch.setattr(bridge, "_append_group_message", lambda *a, **k: None)
+    bridge._run_group_agent("g1", "somebot", "how's lumen doing?")
+    cmd = sent["cmd"]
+    prompt = cmd[cmd.index("-q") + 1]
+    assert prompt.startswith("[Mercury chat] ")
+    assert "never straight from this chat" in prompt
+    assert prompt.endswith("how's lumen doing?")  # the user's words survive intact
+
+
 def test_intents_need_the_api_server(client, mercury, monkeypatch):
     monkeypatch.setattr(bridge, "HERMES_API", HermesApi(Path("/nonexistent"), key=""))
     r = client.post("/api/v1/hermes/intent", json={"kind": "pause"}, headers=auth())
@@ -281,13 +401,30 @@ def test_intents_need_the_api_server(client, mercury, monkeypatch):
 
 
 # -- the rule that keeps the bridge thin -------------------------------------------------
+def _function_source(src: str, name: str) -> tuple[int, int]:
+    """Byte range of one top-level function's source."""
+    start = src.index(f"def {name}(")
+    nxt = src.find("\ndef ", start + 1)
+    return start, len(src) if nxt == -1 else nxt
+
+
 def test_the_bridge_never_acts_for_hermes():
     """Hermes orchestrates; the bridge relays. If one of these appears in bridge.py,
     orchestration has leaked out of Hermes (docs/PLAN-projects-orchestrator.md §2)."""
     src = Path(bridge.__file__).read_text()
     for forbidden in (r"issue['\"]?,\s*['\"]create", r"gh issue create", r"kanban['\"]?,\s*['\"]create",
-                      r"pr['\"]?,\s*['\"]create", r"os\.kill\(", r"\.send_signal\("):
+                      r"pr['\"]?,\s*['\"]create", r"os\.kill\("):
         assert not re.search(forbidden, src), forbidden
+    # Stop is the one deliberate exception, and it stays narrow: the bridge may
+    # signal only the turn process IT started (a Popen handle it recorded in
+    # ACTIVE_RUNS), never a process it found by scanning pids or names. That is
+    # the line Mercury's never-touch list draws — the bridge must never be able
+    # to reach an agent, gateway or coder run it does not own.
+    start, end = _function_source(src, "_request_stop")
+    assert "proc.send_signal(" in src[start:end]
+    for m in re.finditer(r"\.send_signal\(", src):
+        assert start <= m.start() < end, "send_signal() outside _request_stop"
+    assert "psutil" not in src[start:end] and "os.kill" not in src[start:end]
 
 
 def test_project_chats_are_read_from_the_project_agents_db(client, mercury, tmp_path, monkeypatch):

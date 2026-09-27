@@ -212,15 +212,12 @@ class _MessageComposerState extends State<MessageComposer> {
                     ),
                   ),
                   const SizedBox(width: 4),
-                  if (_hasText)
+                  if (state.sending)
+                    _stopButton(context, state)
+                  else if (_hasText)
                     IconButton.filled(
-                      icon: state.sending
-                          ? const SizedBox(
-                              width: 18,
-                              height: 18,
-                              child: CircularProgressIndicator(strokeWidth: 2))
-                          : const Icon(Icons.send_rounded),
-                      onPressed: !widget.enabled || state.sending ? null : _send,
+                      icon: const Icon(Icons.send_rounded),
+                      onPressed: !widget.enabled ? null : _send,
                     )
                   else
                     IconButton(
@@ -241,5 +238,88 @@ class _MessageComposerState extends State<MessageComposer> {
         ],
       ),
     );
+  }
+
+  /// Stop, in two stages, replacing the send button for as long as a turn runs.
+  ///
+  /// Tap one asks the turn to finish the step it is on and end (a steer: the
+  /// reply stays a coherent answer), and the button changes shape so it is
+  /// obvious that is what happened. Tap two asks for confirmation first, then
+  /// cuts the run off wherever it is.
+  Widget _stopButton(BuildContext context, AppState state) {
+    final scheme = Theme.of(context).colorScheme;
+    if (state.stopUnavailable) {
+      // The bridge answered 404: it is an older build with no Stop route.
+      // Going back to the inviting first shape just asked for the same 404
+      // again, so it stays disabled — in the error tone — for this turn.
+      return IconButton.filledTonal(
+        key: const Key('stop-failed'),
+        style: IconButton.styleFrom(
+          disabledBackgroundColor: scheme.errorContainer,
+          disabledForegroundColor: scheme.onErrorContainer,
+        ),
+        icon: const Icon(Icons.block),
+        tooltip: 'the bridge does not have the Stop route (older build)',
+        onPressed: null,
+      );
+    }
+    if (state.stoppingHard) {
+      // The kill is on its way; nothing left to press.
+      return IconButton.filledTonal(
+        key: const Key('stop-confirmed'),
+        icon: const SizedBox(
+            width: 18, height: 18, child: CircularProgressIndicator(strokeWidth: 2)),
+        tooltip: 'Stopping now…',
+        onPressed: null,
+      );
+    }
+    if (state.stopRequested) {
+      return IconButton.filledTonal(
+        key: const Key('stop-kill'),
+        // A different shape, not just a different glyph: the tap that follows
+        // this one is the destructive one.
+        style: IconButton.styleFrom(
+          backgroundColor: scheme.errorContainer,
+          foregroundColor: scheme.onErrorContainer,
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(9)),
+        ),
+        icon: const Icon(Icons.cancel_outlined),
+        tooltip: 'Stopping after this step — tap again to kill it now',
+        onPressed: () => _confirmKill(context, state),
+      );
+    }
+    return IconButton.filled(
+      key: const Key('stop-turn'),
+      icon: const Icon(Icons.stop_rounded),
+      tooltip: 'Stop after this step',
+      onPressed: () => state.stopTurn(),
+    );
+  }
+
+  /// The second tap's confirmation: it is the one that can lose work.
+  Future<void> _confirmKill(BuildContext context, AppState state) async {
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Kill it now?'),
+        content: const Text(
+            'This cuts the run off wherever it is — if it is part-way through a step, '
+            'that step is left unfinished. Stop after this step is the gentler option, '
+            'and it is already on its way.'),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('Cancel')),
+          FilledButton(
+            key: const Key('stop-kill-confirm'),
+            style: FilledButton.styleFrom(
+              backgroundColor: Theme.of(ctx).colorScheme.error,
+              foregroundColor: Theme.of(ctx).colorScheme.onError,
+            ),
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text('Kill it'),
+          ),
+        ],
+      ),
+    );
+    if (ok == true) await state.stopTurn(hard: true);
   }
 }

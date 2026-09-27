@@ -123,48 +123,65 @@ class StatusMessage extends StatelessWidget {
 /// dead bridge, a 401 and a route that does not exist all looked like "nothing
 /// happened". This renders the failure text the bridge actually sent, with a
 /// dismiss action and an expandable list of recent failures.
+///
+/// [offline] is the "can't reach the bridge" variant: a condition rather than a
+/// failure, so it is warning-toned and carries a Retry instead of re-appearing
+/// every time a poll times out.
 class ErrorBanner extends StatelessWidget {
   final String message;
   final List<String> log;
   final VoidCallback onDismiss;
+  final bool offline;
+  final VoidCallback? onRetry;
 
   const ErrorBanner({
     super.key,
     required this.message,
     required this.onDismiss,
     this.log = const [],
+    this.offline = false,
+    this.onRetry,
   });
 
   @override
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
+    final background = offline ? scheme.tertiaryContainer : scheme.errorContainer;
+    final foreground = offline ? scheme.onTertiaryContainer : scheme.onErrorContainer;
     return Material(
-      color: scheme.errorContainer,
+      color: background,
       child: SafeArea(
         bottom: false,
         child: Padding(
           padding: const EdgeInsets.fromLTRB(12, 8, 4, 8),
           child: Row(
             children: [
-              Icon(Icons.error_outline, color: scheme.onErrorContainer, size: 20),
+              Icon(offline ? Icons.cloud_off_outlined : Icons.error_outline,
+                  color: foreground, size: 20),
               const SizedBox(width: 8),
               Expanded(
                 child: Text(
                   message,
                   maxLines: 2,
                   overflow: TextOverflow.ellipsis,
-                  style: TextStyle(color: scheme.onErrorContainer, fontSize: 13),
+                  style: TextStyle(color: foreground, fontSize: 13),
                 ),
               ),
+              if (offline && onRetry != null)
+                TextButton(
+                  key: const Key('offline-retry'),
+                  onPressed: onRetry,
+                  child: Text('Retry', style: TextStyle(color: foreground)),
+                ),
               if (log.length > 1)
                 TextButton(
                   onPressed: () => _showLog(context),
                   child: Text('Log (${log.length})',
-                      style: TextStyle(color: scheme.onErrorContainer)),
+                      style: TextStyle(color: foreground)),
                 ),
               IconButton(
                 tooltip: 'Dismiss',
-                icon: Icon(Icons.close, color: scheme.onErrorContainer, size: 20),
+                icon: Icon(Icons.close, color: foreground, size: 20),
                 onPressed: onDismiss,
               ),
             ],

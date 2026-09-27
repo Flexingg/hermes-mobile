@@ -31,7 +31,11 @@ class HermesRepository implements AppRepository {
   /// the edge rejects the request before the bridge ever sees the bearer.
   final String? accessClientId;
   final String? accessClientSecret;
-  final http.Client _client;
+  http.Client _client;
+
+  /// Only a client this repository made is ours to close and replace; an
+  /// injected one (tests) belongs to the caller.
+  final bool _ownsClient;
 
   HermesRepository({
     required this.baseUrl,
@@ -39,7 +43,8 @@ class HermesRepository implements AppRepository {
     this.accessClientId,
     this.accessClientSecret,
     http.Client? client,
-  }) : _client = client ?? http.Client();
+  })  : _client = client ?? http.Client(),
+        _ownsClient = client == null;
 
   /// Extra headers a Cloudflare Access policy expects on every request,
   /// including the WebSocket handshake.
@@ -69,18 +74,41 @@ class HermesRepository implements AppRepository {
   ApiFailure _offline(String method, String path, Object error) =>
       ApiFailure(method, path, 0, 'could not reach $baseUrl: $error');
 
+  /// Throw away the pooled connection. After the phone changes network (or the
+  /// bridge restarts) the pool can hand back a socket that is already dead: the
+  /// request never leaves the phone and only the 15 s timeout ends it.
+  ///
+  /// The old client is abandoned rather than closed: `IOClient.close()` forces
+  /// every request still on it shut, and that would cut off a healthy long call
+  /// (a 3-minute `chat/start`, an intent, a download) sharing the pool. Its idle
+  /// sockets close on their own idle timeout.
+  void _dropClient() {
+    if (!_ownsClient) return;
+    _client = http.Client();
+  }
+
+  /// A GET that failed in transport gets one more try on a fresh connection —
+  /// it is idempotent, so a retry can't do anything twice. A non-2xx is an
+  /// answer, not a dead socket, and is never retried.
   Future<dynamic> _get(String path) async {
     http.Response res;
     try {
-      res = await _client
-          .get(Uri.parse('$baseUrl$path'), headers: _headers)
-          .timeout(const Duration(seconds: 15));
-    } catch (e) {
-      throw _offline('GET', path, e);
+      res = await _getOnce(path);
+    } catch (_) {
+      _dropClient();
+      try {
+        res = await _getOnce(path);
+      } catch (e) {
+        throw _offline('GET', path, e);
+      }
     }
     if (res.statusCode >= 400) throw _failure('GET', path, res);
     return jsonDecode(res.body);
   }
+
+  Future<http.Response> _getOnce(String path) => _client
+      .get(Uri.parse('$baseUrl$path'), headers: _headers)
+      .timeout(const Duration(seconds: 15));
 
   Future<dynamic> _post(String path, [Map<String, dynamic>? body]) async {
     http.Response res;
@@ -418,6 +446,11 @@ class HermesRepository implements AppRepository {
         });
         continue;
       }
+      // The bridge also announces a Stop to everyone watching this session
+      // ("stop_requested"), including the device that asked. It is not reply
+      // text: rendering it would put an empty bubble in the thread. The Stop
+      // UI's own state is per-device and lives in AppState.
+      if (event == 'stop_requested') continue;
       final type = (data['type'] as String?) ?? 'answer';
       final delta = data['delta'] as String? ?? '';
       if (type != curType) {
@@ -556,6 +589,16 @@ class HermesRepository implements AppRepository {
   Future<List<ChatSession>> searchSessions(String query) async =>
       sessions().then((s) => s.where((x) =>
           x.title.toLowerCase().contains(query.toLowerCase())).toList());
+
+  /// Stop the turn running on this session. The bridge does the stopping: it
+  /// steers the live run (graceful) or interrupts it (hard), and reports back
+  /// which one actually happened.
+  @override
+  Future<String> stopTurn(String sessionId, {bool hard = false}) async {
+    final data = await _post('/api/v1/sessions/$sessionId/stop',
+        {'mode': hard ? 'hard' : 'graceful'});
+    return '${(data as Map)['applied'] ?? 'none'}';
+  }
 
   // ---- Groups (multi-agent chat) --------------------------------------
   @override
@@ -807,6 +850,32 @@ class HermesRepository implements AppRepository {
   Future<List<Project>> projects() async => (await _get('/api/v1/projects') as List)
       .map((j) => Project.fromJson((j as Map).cast<String, dynamic>()))
       .toList();
+
+  // Notes are yours: the bridge keeps them beside the registry and never feeds
+  // them to a model. Deliberately separate from the project's Memory, which is
+  // injected into the agent's prompt on every turn.
+  @override
+  Future<List<ProjectNote>> projectNotes(String id) async =>
+      (await _get('/api/v1/projects/${Uri.encodeComponent(id)}/notes') as List)
+          .map((j) => ProjectNote.fromJson((j as Map).cast<String, dynamic>()))
+          .toList();
+
+  @override
+  Future<ProjectNote> addProjectNote(String id, String text) async =>
+      ProjectNote.fromJson((await _post('/api/v1/projects/${Uri.encodeComponent(id)}/notes',
+              {'text': text}) as Map)
+          .cast<String, dynamic>());
+
+  @override
+  Future<ProjectNote> editProjectNote(String id, String noteId, String text) async =>
+      ProjectNote.fromJson((await _patch(
+              '/api/v1/projects/${Uri.encodeComponent(id)}/notes/${Uri.encodeComponent(noteId)}',
+              {'text': text}) as Map)
+          .cast<String, dynamic>());
+
+  @override
+  Future<void> deleteProjectNote(String id, String noteId) async => _delete(
+      '/api/v1/projects/${Uri.encodeComponent(id)}/notes/${Uri.encodeComponent(noteId)}');
 
   @override
   Future<Project> project(String id) async => Project.fromJson(

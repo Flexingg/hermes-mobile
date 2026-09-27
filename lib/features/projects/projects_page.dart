@@ -19,16 +19,17 @@ class ProjectsPage extends StatefulWidget {
 }
 
 class _ProjectsPageState extends State<ProjectsPage> {
+  static const _key = 'projects';
+  static const _normal = Duration(seconds: 15);
   Timer? _poll;
 
   @override
   void initState() {
     super.initState();
     WidgetsBinding.instance.addPostFrameCallback((_) => _refresh());
-    // Work moves in the background (queued -> working -> ready); keep up.
-    _poll = Timer.periodic(const Duration(seconds: 15), (_) {
-      if (mounted) context.read<AppState>().loadProjects();
-    });
+    // Work moves in the background (queued -> working -> ready); keep up. The
+    // state decides the cadence, so a dead bridge is polled slower, not harder.
+    _schedule(_normal);
   }
 
   @override
@@ -37,9 +38,26 @@ class _ProjectsPageState extends State<ProjectsPage> {
     super.dispose();
   }
 
+  void _schedule(Duration d) {
+    _poll?.cancel();
+    _poll = Timer(d, _tick);
+  }
+
+  Future<void> _tick() async {
+    if (!mounted) return;
+    final state = context.read<AppState>();
+    await state.pollTick(_key, () => state.loadProjects(), normal: _normal);
+    if (mounted) _schedule(state.pollInterval(_key, _normal));
+  }
+
   Future<void> _refresh() async {
     final state = context.read<AppState>();
-    await Future.wait([state.loadProjects(), state.loadAgents()]);
+    // Only the polled load is in the tick, so a missing agents route can't
+    // stop the projects poll.
+    await Future.wait([
+      state.pollTick(_key, () => state.loadProjects(), normal: _normal, userInitiated: true),
+      state.loadAgents(),
+    ]);
   }
 
   Future<void> _openLink() async {
