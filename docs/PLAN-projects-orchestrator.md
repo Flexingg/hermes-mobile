@@ -231,6 +231,10 @@ subprocess path stays as the fallback transport until the API-server path is pro
 | 6 | Auto-execute | Yes, as soon as the issue exists |
 | 7 | GitHub-filed issues | Yes, via the `mercury` label |
 | 8 | Who orchestrates | **Hermes, through Mercury.** The bridge only relays (v2) |
+| 9 | Stop | Two-stage (asked for by hand): tap 1 asks the turn to finish the step it is on and end; tap 2 confirms, then kills it where it is |
+| 10 | Notes vs memory | Notes are the user's and are **never** injected into a prompt; memory stays the agent's. Different tabs, different stores |
+| 11 | Push policy | Per project. `auto` (default, unchanged): the PR opens when the gates pass. `test-first`: commit + build, park, and wait for the user's test |
+| 12 | Context digest | Per project, written once by the orchestrator (<8000 chars), read by every worker instead of the README |
 
 ## 11. Out of scope
 
@@ -346,3 +350,76 @@ push for "ready" uses the existing FCM path, so it needs the phone registered as
    generate it without printing it.
 3. **SimpleFIN MCP data dir:** fix it in the SimpleFIN repo (read the data dir from an env var with a fixed
    default, e.g. `~/.hermes/simplefin-data`), or just remove that MCP server from the `dev-*` profiles?
+
+## 17. Stop, notes, test-first, and the token budget (2026-09-26, PR #11)
+
+Asked for by hand, in the user's words: a Stop button in any chat or plan, a notes
+section per project, and being able to load the APK (or run the server) for testing
+**before** it is committed to GitHub — plus ideas for spending fewer tokens.
+
+### Stop is two-stage, and the gateway has no stop for a session
+
+There is no session-keyed stop anywhere in the API server: `/v1/runs/{run_id}/stop`
+and `/steer` exist, but they are keyed by a run id the *client* never sees. What the
+bridge does instead:
+
+1. `run.started` is the first SSE event of a turn and carries the `run_id`. The
+   bridge records it (and the turn's profile and, for the CLI transport, the Popen
+   it started) in `ACTIVE_RUNS[session_id]` for the length of the turn.
+2. **Tap 1 = graceful**, and it is a *steer*, not an interrupt:
+   `POST /p/<profile>/v1/runs/<run_id>/steer` with `STOP_STEER_NOTE`. `agent.steer`'s
+   drain hook appends it to the next tool result, so the step in flight finishes and
+   the model then ends the turn — the reply stays a coherent answer instead of a
+   torn-off fragment. The button changes shape (round filled square → rounded,
+   error-coloured) and the sending bar says "Stopping after this step…".
+3. **Tap 2 = hard**, behind a confirmation dialog: `POST …/v1/runs/<run_id>/stop`,
+   which interrupts the run and reaps what it started.
+4. The CLI transport (image turns, or an unavailable API server) has no run id, so
+   the bridge signals the handle it started: SIGINT for graceful, SIGKILL for hard.
+   This is the one place `bridge.py` signals a process. The thin-bridge guard test
+   now pins it to `_request_stop` and to a handle the bridge recorded itself — never
+   a pid it looked up — so it still cannot reach a gateway, agent or coder run
+   (§6.6).
+
+**Verified live** (throwaway bridge on `:9131`, the real gateway, the real default
+profile, a turn running `sleep 12`): graceful → `applied: "graceful"`, and the final
+message was *"done — sleep 12 completed (exit 0). Nothing left unfinished."* — the
+step finished, then the turn ended. Hard → `applied: "hard"`, final message
+*"Operation interrupted."* The two throwaway sessions were deleted afterwards.
+
+### Notes are the opposite of memory
+
+Memory is injected into the agent's prompt on every turn: it costs tokens forever and
+it can steer the agent. A note must not. Notes live in
+`~/.hermes/mercury/notes/<project>.json`, are never sent to a model, and reach the
+agent only through "Ask the agent about this", which opens a chat with the note
+pre-filled. A test asserts a note never lands in the agent's `memories/`.
+
+### test-first: the push is the user's
+
+`pushPolicy` per project (`auto` | `test-first`). Under test-first the worker commits
+on the task branch, keeps the debug build the gates produced, parks the task as
+`phase: awaiting_push` and stops — **nothing is pushed and no PR exists**. The app
+shows "Built — not pushed" with *Install test build* and *Push it*; Push re-runs
+`mercury_ship.py publish --approved` on the same commit, reading the title and the PR
+body back from the task state (the body as a file under `~/.hermes/mercury/awaiting/`,
+because a worker's `/tmp` file may not survive). The bridge offers that build only for
+the commit it was made from, and never in place of CI on a task in review.
+
+### Token budget
+
+- **A failed gate** used to hand back "the last 40 lines" — unbounded in characters,
+  and it is what a follow-up brief is built from, so two coder rounds paid for the
+  same log twice. Now: a bounded tail, the failure signature (first line that looks
+  like the real error, plus context), and the *path* to the full log.
+- **The README** was read by every worker (`ship-issue` said to read
+  `AGENTS.md`/`CLAUDE.md`/`README`; this repo has no AGENTS.md, so it read 19 KB of
+  README per task). Now: `mercury_context.py show|set|list` keeps a hand-written
+  digest per project (<8000 chars, refused if longer), written once by the
+  orchestrator at link time, and `prepare` reports whether it exists.
+- **Not done, filed as issues #12–#14:** Plan mode still pays for the project
+  profile's whole tool schema every turn (the API server has no per-request toolset
+  override — §16); one-tap "run the project's server for testing"; and a spike branch
+  (try an idea in a worktree before filing an issue). The deterministic-CI idea from
+  the same conversation was already true: intake, CI follow-up and the RAM floor are
+  `--no-agent` cron jobs (§16).
