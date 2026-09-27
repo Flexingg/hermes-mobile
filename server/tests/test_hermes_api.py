@@ -25,7 +25,7 @@ def sse(event: str, payload: dict) -> bytes:
 
 GOOD_RUN = [
     b": keepalive\n\n",
-    sse("run.started", {"user_message": {"role": "user", "content": "hi"}}),
+    sse("run.started", {"run_id": "r-1", "user_message": {"role": "user", "content": "hi"}}),
     sse("tool.progress", {"tool_name": "_thinking", "delta": "pondering"}),
     sse("tool.started", {"tool_name": "terminal", "preview": "ls -la"}),
     sse("tool.completed", {"tool_name": "terminal"}),
@@ -47,6 +47,13 @@ class FakeApi:
         self.sessions = {"s1"}
         # /p/<profile>/ prefixes: each profile has its own key, like the real one
         self.profile_keys = {"lumen": "L" * 32}
+        # Live runs (Stop): what the gateway knows about, and what it was asked.
+        self.runs = {"r-1": "running"}
+        self.steers = []
+        self.stops = []
+        # Set to a threading.Event to hold a stream open mid-run, so a test can
+        # act while the turn is genuinely in flight.
+        self.pause = None
 
     def start(self):
         fake = self
@@ -99,6 +106,26 @@ class FakeApi:
                 if path == "/api/sessions":
                     fake.sessions.add("api_new")
                     return self._json(201, {"object": "hermes.session", "session": {"id": "api_new"}})
+                # Live-turn control (Stop). Mirrors the gateway's real contract:
+                # stop/steer are run-id-keyed, 404 when the run is gone.
+                if path.startswith("/v1/runs/"):
+                    parts = path.split("/")           # ['', 'v1', 'runs', '<id>', '<verb>']
+                    run_id, verb = parts[3], (parts[4] if len(parts) > 4 else "")
+                    if run_id not in fake.runs:
+                        return self._json(404, {"error": {"message": f"Run not found: {run_id}",
+                                                          "code": "run_not_found"}})
+                    if verb == "steer":
+                        if fake.runs[run_id] != "running":
+                            return self._json(409, {"error": {"message": "not accepting steer",
+                                                              "code": "run_not_accepting_steer"}})
+                        fake.steers.append((run_id, body.get("input")))
+                        return self._json(200, {"object": "hermes.run.steer", "run_id": run_id,
+                                                "accepted": True})
+                    if verb == "stop":
+                        fake.stops.append(run_id)
+                        fake.runs[run_id] = "stopping"
+                        return self._json(200, {"run_id": run_id, "status": "stopping"})
+                    return self._json(404, {})
                 sid = path.split("/")[3]
                 if sid not in fake.sessions:
                     return self._json(404, {"error": {"message": f"Session not found: {sid}"}})
@@ -108,9 +135,11 @@ class FakeApi:
                     self.send_response(200)
                     self.send_header("Content-Type", "text/event-stream")
                     self.end_headers()
-                    for frame in fake.stream:
+                    for i, frame in enumerate(fake.stream):
                         self.wfile.write(frame)
                         self.wfile.flush()
+                        if fake.pause is not None and i == 1:
+                            fake.pause.wait(5)
                     return
                 if path.endswith("/chat"):
                     return self._json(200, {"session_id": sid,

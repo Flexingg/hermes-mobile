@@ -25,6 +25,7 @@ import hmac
 import json
 import os
 import re
+import signal
 import sqlite3
 import subprocess
 import threading
@@ -43,9 +44,9 @@ from starlette.requests import Request
 from starlette.responses import FileResponse, JSONResponse, Response
 
 try:  # run as `python server/bridge.py` (the systemd unit) or with server/ on sys.path (tests)
-    from hermes_api import HermesApi, HermesApiError, named_profile
+    from hermes_api import HermesApi, HermesApiError, STOP_STEER_NOTE, named_profile
 except ImportError:  # `uvicorn server.bridge:app` from the repo root
-    from server.hermes_api import HermesApi, HermesApiError, named_profile
+    from server.hermes_api import HermesApi, HermesApiError, STOP_STEER_NOTE, named_profile
 
 HERMES = Path(os.environ.get("HERMES_HOME", str(Path.home() / ".hermes")))
 STATE_DB = HERMES / "state.db"
@@ -980,6 +981,107 @@ def send_message(session_id: str, body: dict):
     return {"ok": True, "pending": True}
 
 
+# ---- Live turn control (Stop) --------------------------------------------------
+# One entry per turn this bridge is running, keyed by session id. Stop needs
+# something to act on, and neither transport is keyed the way the app is: the
+# gateway's steer/stop routes take the RUN id it assigns to a turn (it has no
+# session-keyed stop at all), and the CLI fallback has a process instead. Both
+# are recorded here for the duration of the turn.
+ACTIVE_RUNS: dict[str, dict] = {}
+_ACTIVE_LOCK = threading.Lock()
+
+
+def _register_run(session_id: str, profile: str | None, kind: str = "api") -> None:
+    with _ACTIVE_LOCK:
+        ACTIVE_RUNS[session_id] = {"run_id": None, "profile": profile, "proc": None,
+                                   "kind": kind, "started": time.time(),
+                                   "stop_requested": None}
+
+
+def _set_run_id(session_id: str, run_id: str) -> None:
+    """The gateway told us which run this turn is (first SSE event)."""
+    with _ACTIVE_LOCK:
+        info = ACTIVE_RUNS.get(session_id)
+        if info is not None:
+            info["run_id"] = run_id
+
+
+def _set_run_proc(session_id: str, proc) -> None:
+    """The CLI fallback's process, so Stop can signal it."""
+    with _ACTIVE_LOCK:
+        info = ACTIVE_RUNS.get(session_id)
+        if info is not None:
+            info["proc"] = proc
+
+
+def _clear_run(session_id: str) -> None:
+    with _ACTIVE_LOCK:
+        ACTIVE_RUNS.pop(session_id, None)
+
+
+def _active_run(session_id: str) -> dict | None:
+    with _ACTIVE_LOCK:
+        info = ACTIVE_RUNS.get(session_id)
+        return dict(info) if info else None
+
+
+def _request_stop(session_id: str, *, hard: bool) -> str:
+    """Stop the turn running on this session; returns what was actually done.
+
+    ``"graceful"`` — a steer: the agent finishes the step it is on, then ends the
+    turn. Nothing is torn down, so the reply stays a coherent answer.
+    ``"hard"`` — interrupt the run where it is, reaping what it started.
+    ``"none"`` — nothing was running (the reply beat the tap).
+    """
+    info = _active_run(session_id)
+    if info is None:
+        return "none"
+    profile = info.get("profile")
+    run_id = info.get("run_id")
+    if run_id and HERMES_API.serves(profile) and HERMES_API.available():
+        try:
+            done = (HERMES_API.stop_run(run_id, profile=profile) if hard
+                    else HERMES_API.steer_run(run_id, STOP_STEER_NOTE, profile=profile))
+        except HermesApiError as e:
+            print(f"[bridge] stop request failed ({e})", flush=True)
+            done = False
+        if done:
+            with _ACTIVE_LOCK:
+                info = ACTIVE_RUNS.get(session_id)
+                if info is not None:
+                    info["stop_requested"] = "hard" if hard else "graceful"
+            return "hard" if hard else "graceful"
+    proc = info.get("proc")
+    if proc is not None and proc.poll() is None:  # the CLI fallback
+        # The one place the bridge signals a process, and only ever the handle it
+        # started for this turn (recorded in ACTIVE_RUNS above). It never looks a
+        # process up by pid or name, so it cannot reach a gateway, agent or coder
+        # run Mercury does not own — the never-touch rule (PLAN §6.6). The guard
+        # test in server/tests/test_projects.py keeps it that way.
+        try:
+            proc.send_signal(signal.SIGKILL if hard else signal.SIGINT)
+        except OSError:
+            return "none"
+        return "hard" if hard else "graceful"
+    return "none"
+
+
+@app.post("/api/v1/sessions/{session_id}/stop")
+def stop_turn(session_id: str, body: dict | None = None):
+    """Stop the turn running on this session.
+
+    `mode: "graceful"` (default) asks the agent to finish the step it is on and
+    end the turn; `mode: "hard"` cuts the run off wherever it is. The app sends
+    graceful on the first tap of Stop and hard on the confirmed second one.
+    """
+    mode = str((body or {}).get("mode") or "graceful").lower()
+    if mode not in ("graceful", "hard"):
+        raise HTTPException(status_code=400, detail="mode must be 'graceful' or 'hard'")
+    applied = _request_stop(session_id, hard=(mode == "hard"))
+    _broadcast(session_id, {"event": "stop_requested", "mode": mode, "applied": applied})
+    return {"ok": True, "mode": mode, "applied": applied}
+
+
 def _spawn_hermes(
     session_id: str, text: str, attachments: list | None = None, profile: str | None = None,
     system: str | None = None,
@@ -1005,27 +1107,32 @@ def _spawn_hermes(
             f"{query}\n\n[Attached files: {refs}. Read them with read_file/search_files if needed.]"
         )
     prof = (profile or _chat_profile() or "").strip() or None
+    _register_run(session_id, prof)
 
     def run():
-        # Images still need the CLI's --image; everything else goes to the
-        # resident gateway when it serves this profile.
-        if img_path is None and HERMES_API.serves(prof) and HERMES_API.available():
-            try:
-                HERMES_API.stream_chat(session_id, query, lambda c: _broadcast(session_id, c),
-                                       profile=prof, system=system)
-                _broadcast(session_id, {"event": "done"})
-                _send_chat_reply_push(session_id)
-                return
-            except HermesApiError as e:
-                if e.started:
-                    # Part of the reply is already on screen: running the turn
-                    # again through the CLI would answer twice. Say what broke.
-                    _broadcast(session_id, {"event": "chunk", "type": "technical",
-                                            "delta": f"⚠ {e}\n"})
+        try:
+            # Images still need the CLI's --image; everything else goes to the
+            # resident gateway when it serves this profile.
+            if img_path is None and HERMES_API.serves(prof) and HERMES_API.available():
+                try:
+                    HERMES_API.stream_chat(session_id, query, lambda c: _broadcast(session_id, c),
+                                           profile=prof, system=system,
+                                           on_run=lambda rid: _set_run_id(session_id, rid))
                     _broadcast(session_id, {"event": "done"})
+                    _send_chat_reply_push(session_id)
                     return
-                print(f"[bridge] API server did not take the turn ({e}); using the CLI", flush=True)
-        _run_hermes_cli(session_id, query, img_path, prof)
+                except HermesApiError as e:
+                    if e.started:
+                        # Part of the reply is already on screen: running the turn
+                        # again through the CLI would answer twice. Say what broke.
+                        _broadcast(session_id, {"event": "chunk", "type": "technical",
+                                                "delta": f"⚠ {e}\n"})
+                        _broadcast(session_id, {"event": "done"})
+                        return
+                    print(f"[bridge] API server did not take the turn ({e}); using the CLI", flush=True)
+            _run_hermes_cli(session_id, query, img_path, prof)
+        finally:
+            _clear_run(session_id)
 
     t = threading.Thread(target=run, daemon=True)
     t.start()
@@ -1045,6 +1152,8 @@ def _run_hermes_cli(session_id: str, query: str, img_path: str | None, prof: str
         cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
         stdin=subprocess.DEVNULL, start_new_session=True,
     )
+    # Let Stop reach this turn: it has no run id here, so the process is the handle.
+    _set_run_proc(session_id, proc)
     # `sent` lets the classifier recognise the echo of the prompt we just handed
     # the CLI (it wraps, and the wrapped tail is not the agent talking).
     state = {"thinking": False, "sent": query}
@@ -3138,6 +3247,88 @@ def project_sessions(pid: str):
     if not _profile_db_path(project["profile"]).exists():
         return []
     return _list_sessions([project["profile"]])
+
+
+# ---- Project notes -------------------------------------------------------------
+# Yours, not the agent's. Memory (memories/MEMORY.md) is injected into the
+# agent's prompt on every turn, so anything parked there costs tokens forever
+# and can steer it. A note is inert: it lives beside the registry, is never
+# sent to a model, and only leaves the app when you tap "Ask the agent".
+NOTES_DIR = MERCURY_DIR / "notes"
+_NOTE_LIMIT = 8000
+
+
+def _notes_path(pid: str) -> Path:
+    return NOTES_DIR / f"{pid}.json"
+
+
+def _load_notes(pid: str) -> list[dict]:
+    try:
+        data = json.loads(_notes_path(pid).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+    notes = data.get("notes") if isinstance(data, dict) else data
+    return [n for n in notes or [] if isinstance(n, dict) and n.get("id")]
+
+
+def _save_notes(pid: str, notes: list[dict]) -> None:
+    """Atomic: a crash mid-write must not lose notes the user typed."""
+    NOTES_DIR.mkdir(parents=True, exist_ok=True)
+    dest = _notes_path(pid)
+    tmp = dest.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps({"project": pid, "notes": notes}, indent=2), encoding="utf-8")
+    os.replace(tmp, dest)
+
+
+def _note_text(body: dict | None) -> str:
+    text = str((body or {}).get("text") or "").strip()
+    if not text:
+        raise HTTPException(status_code=400, detail="text required")
+    if len(text) > _NOTE_LIMIT:
+        raise HTTPException(status_code=400, detail=f"note too long ({_NOTE_LIMIT} char max)")
+    return text
+
+
+@app.get("/api/v1/projects/{pid}/notes")
+def project_notes(pid: str):
+    _project_or_404(pid)
+    return _load_notes(pid)
+
+
+@app.post("/api/v1/projects/{pid}/notes")
+def add_project_note(pid: str, body: dict):
+    _project_or_404(pid)
+    text = _note_text(body)
+    notes = _load_notes(pid)
+    note = {"id": f"n-{int(time.time() * 1000):x}-{len(notes):x}",
+            "text": text, "at": _iso(time.time()), "updatedAt": None}
+    notes.append(note)
+    _save_notes(pid, notes)
+    return note
+
+
+@app.patch("/api/v1/projects/{pid}/notes/{note_id}")
+def edit_project_note(pid: str, note_id: str, body: dict):
+    _project_or_404(pid)
+    text = _note_text(body)
+    notes = _load_notes(pid)
+    for n in notes:
+        if n.get("id") == note_id:
+            n["text"], n["updatedAt"] = text, _iso(time.time())
+            _save_notes(pid, notes)
+            return n
+    raise HTTPException(status_code=404, detail="note not found")
+
+
+@app.delete("/api/v1/projects/{pid}/notes/{note_id}")
+def delete_project_note(pid: str, note_id: str):
+    _project_or_404(pid)
+    notes = _load_notes(pid)
+    kept = [n for n in notes if n.get("id") != note_id]
+    if len(kept) == len(notes):
+        raise HTTPException(status_code=404, detail="note not found")
+    _save_notes(pid, kept)
+    return {"ok": True}
 
 
 _REPOS_CACHE: dict = {"at": 0.0, "data": []}

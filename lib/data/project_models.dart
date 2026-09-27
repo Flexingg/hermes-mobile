@@ -362,3 +362,30 @@ class IntentResult {
   final String reply;
   const IntentResult({required this.sessionId, required this.reply});
 }
+
+/// A note you jotted on a project. Deliberately not [MemoryEntry]: memory is
+/// injected into the agent's prompt on every turn, so it costs tokens forever
+/// and can steer the agent. A note is inert — it never reaches a model until you
+/// tap "Ask the agent" on it.
+class ProjectNote {
+  final String id;
+  final String text;
+  final DateTime at;
+  final DateTime? updatedAt;
+  const ProjectNote({
+    required this.id,
+    required this.text,
+    required this.at,
+    this.updatedAt,
+  });
+
+  factory ProjectNote.fromJson(Map<String, dynamic> j) {
+    final edited = (j['updatedAt'] ?? '').toString();
+    return ProjectNote(
+      id: (j['id'] ?? '').toString(),
+      text: (j['text'] ?? '').toString(),
+      at: DateTime.tryParse((j['at'] ?? '').toString()) ?? DateTime.now(),
+      updatedAt: edited.isEmpty ? null : DateTime.tryParse(edited),
+    );
+  }
+}

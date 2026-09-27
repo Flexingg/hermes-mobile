@@ -45,6 +45,7 @@ class _ProjectPageState extends State<ProjectPage> {
     final p = state.projectById(widget.projectId);
     await Future.wait([
       state.loadProjectSessions(widget.projectId),
+      state.loadProjectNotes(widget.projectId),
       if (p != null) state.loadProjectMemory(p.profile),
     ]);
   }
@@ -57,7 +58,7 @@ class _ProjectPageState extends State<ProjectPage> {
       return Scaffold(appBar: AppBar(), body: const Center(child: CircularProgressIndicator()));
     }
     return DefaultTabController(
-      length: 4,
+      length: 5,
       initialIndex: widget.initialTab,
       child: Scaffold(
         appBar: AppBar(
@@ -76,16 +77,21 @@ class _ProjectPageState extends State<ProjectPage> {
           actions: [
             Padding(padding: const EdgeInsets.only(right: 12), child: ProjectStatusChip(p.status, dense: true)),
           ],
-          bottom: TabBar(tabs: [
-            const Tab(text: 'Chat'),
-            Tab(child: _WorkTabLabel(p)),
-            const Tab(text: 'Memory'),
-            const Tab(text: 'Settings'),
-          ]),
+          bottom: TabBar(
+            labelPadding: const EdgeInsets.symmetric(horizontal: 8),
+            tabs: [
+              const Tab(text: 'Chat'),
+              Tab(child: _WorkTabLabel(p)),
+              Tab(child: _NotesTabLabel(p)),
+              const Tab(text: 'Memory'),
+              const Tab(text: 'Settings'),
+            ],
+          ),
         ),
         body: TabBarView(children: [
           _ChatsTab(project: p, onRefresh: _refresh),
           _WorkTab(project: p, onRefresh: _refresh),
+          _NotesTab(project: p),
           _MemoryTab(project: p),
           _SettingsTab(project: p),
         ]),
@@ -103,6 +109,22 @@ class _WorkTabLabel extends StatelessWidget {
     final n = p.needsYou + p.ready;
     return Row(mainAxisSize: MainAxisSize.min, children: [
       const Text('Work'),
+      if (n > 0) ...[const SizedBox(width: 6), Badge(label: Text('$n'))],
+    ]);
+  }
+}
+
+/// Notes are yours, and there is no badge to earn: the count is only there so
+/// you can see at a glance whether you have written anything down.
+class _NotesTabLabel extends StatelessWidget {
+  final Project p;
+  const _NotesTabLabel(this.p);
+
+  @override
+  Widget build(BuildContext context) {
+    final n = context.watch<AppState>().projectNotesFor(p.id).length;
+    return Row(mainAxisSize: MainAxisSize.min, children: [
+      const Text('Notes'),
       if (n > 0) ...[const SizedBox(width: 6), Badge(label: Text('$n'))],
     ]);
   }
@@ -231,6 +253,126 @@ class _WorkTab extends StatelessWidget {
                   child: TaskCard(project: project, task: t))),
           ],
         ],
+      ),
+    );
+  }
+}
+
+// ---- Notes ------------------------------------------------------------------------
+/// Notes are the user's own scratch space for a project, and the one thing on
+/// this screen that is deliberately NOT the agent's: they are stored beside the
+/// registry, never injected into a prompt, and only reach the agent when the
+/// user taps "Ask about this". Memory (the next tab) is the opposite — it is
+/// prompt-visible on every turn.
+class _NotesTab extends StatelessWidget {
+  final Project project;
+  const _NotesTab({required this.project});
+
+  Future<void> _write(BuildContext context, {ProjectNote? editing}) async {
+    final ctl = TextEditingController(text: editing?.text ?? '');
+    final text = await showDialog<String>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: Text(editing == null ? 'New note' : 'Edit note'),
+        content: TextField(
+          controller: ctl,
+          autofocus: true,
+          maxLines: 8,
+          minLines: 3,
+          decoration: const InputDecoration(
+            border: OutlineInputBorder(),
+            hintText: 'Anything you want to come back to: a hunch, a rough edge, a thing to try',
+          ),
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Cancel')),
+          FilledButton(onPressed: () => Navigator.pop(ctx, ctl.text.trim()), child: const Text('Save')),
+        ],
+      ),
+    );
+    if (text == null || text.isEmpty || !context.mounted) return;
+    final state = context.read<AppState>();
+    await state.guard(
+        () => editing == null
+            ? state.addProjectNote(project.id, text)
+            : state.editProjectNote(project.id, editing.id, text),
+        context: 'save note');
+  }
+
+  /// Open a chat with the project's agent with the note pre-filled. The note
+  /// only reaches the agent through this: the user decides, per note.
+  Future<void> _ask(BuildContext context, ProjectNote n) async {
+    final state = context.read<AppState>();
+    final sid = await state.createProjectChat(project, project.name);
+    if (sid == null || !context.mounted) return;
+    Navigator.of(context).push(MaterialPageRoute(
+        builder: (_) => ChatThreadPage(
+            sessionId: sid,
+            name: project.name,
+            project: project,
+            draftText: 'About my note:\n\n"${n.text}"\n\n')));
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final state = context.watch<AppState>();
+    final scheme = Theme.of(context).colorScheme;
+    final notes = state.projectNotesFor(project.id);
+    return Scaffold(
+      body: ListView(
+        padding: const EdgeInsets.fromLTRB(12, 12, 12, 96),
+        children: [
+          Padding(
+            padding: const EdgeInsets.fromLTRB(8, 0, 8, 8),
+            child: Text('Your scratch space for ${project.name}. Nothing here is sent to '
+                'the agent or costs anything to keep — ask about one and it becomes the '
+                'start of a conversation.',
+                style: TextStyle(color: scheme.onSurfaceVariant, fontSize: 13)),
+          ),
+          if (notes.isEmpty)
+            Padding(
+              padding: const EdgeInsets.all(24),
+              child: Column(children: [
+                Icon(Icons.sticky_note_2_outlined, size: 48, color: scheme.outlineVariant),
+                const SizedBox(height: 8),
+                Text('No notes yet.', textAlign: TextAlign.center, style: TextStyle(color: scheme.outline)),
+              ]),
+            )
+          else
+            ...notes.reversed.map((n) => Card(
+                  elevation: 0,
+                  color: scheme.surfaceContainerLow,
+                  child: ListTile(
+                    key: Key('note-${n.id}'),
+                    isThreeLine: n.text.length > 80,
+                    title: Text(n.text, style: const TextStyle(fontSize: 14)),
+                    subtitle: Text(
+                        '${formatRelativeTime(n.at)}${n.updatedAt == null ? '' : ' · edited'}',
+                        style: TextStyle(fontSize: 11, color: scheme.outline)),
+                    onTap: () => _write(context, editing: n),
+                    trailing: PopupMenuButton<String>(
+                      onSelected: (v) {
+                        if (v == 'edit') _write(context, editing: n);
+                        if (v == 'ask') _ask(context, n);
+                        if (v == 'delete') {
+                          state.guard(() => state.deleteProjectNote(project.id, n.id), context: 'delete note');
+                        }
+                      },
+                      itemBuilder: (_) => const [
+                        PopupMenuItem(value: 'ask', child: Text('Ask the agent about this')),
+                        PopupMenuItem(value: 'edit', child: Text('Edit')),
+                        PopupMenuItem(value: 'delete', child: Text('Delete')),
+                      ],
+                    ),
+                  ),
+                )),
+        ],
+      ),
+      floatingActionButton: FloatingActionButton(
+        heroTag: 'project-note',
+        tooltip: 'Jot a note',
+        onPressed: () => _write(context),
+        child: const Icon(Icons.add),
       ),
     );
   }

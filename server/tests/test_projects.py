@@ -281,13 +281,30 @@ def test_intents_need_the_api_server(client, mercury, monkeypatch):
 
 
 # -- the rule that keeps the bridge thin -------------------------------------------------
+def _function_source(src: str, name: str) -> tuple[int, int]:
+    """Byte range of one top-level function's source."""
+    start = src.index(f"def {name}(")
+    nxt = src.find("\ndef ", start + 1)
+    return start, len(src) if nxt == -1 else nxt
+
+
 def test_the_bridge_never_acts_for_hermes():
     """Hermes orchestrates; the bridge relays. If one of these appears in bridge.py,
     orchestration has leaked out of Hermes (docs/PLAN-projects-orchestrator.md §2)."""
     src = Path(bridge.__file__).read_text()
     for forbidden in (r"issue['\"]?,\s*['\"]create", r"gh issue create", r"kanban['\"]?,\s*['\"]create",
-                      r"pr['\"]?,\s*['\"]create", r"os\.kill\(", r"\.send_signal\("):
+                      r"pr['\"]?,\s*['\"]create", r"os\.kill\("):
         assert not re.search(forbidden, src), forbidden
+    # Stop is the one deliberate exception, and it stays narrow: the bridge may
+    # signal only the turn process IT started (a Popen handle it recorded in
+    # ACTIVE_RUNS), never a process it found by scanning pids or names. That is
+    # the line Mercury's never-touch list draws — the bridge must never be able
+    # to reach an agent, gateway or coder run it does not own.
+    start, end = _function_source(src, "_request_stop")
+    assert "proc.send_signal(" in src[start:end]
+    for m in re.finditer(r"\.send_signal\(", src):
+        assert start <= m.start() < end, "send_signal() outside _request_stop"
+    assert "psutil" not in src[start:end] and "os.kill" not in src[start:end]
 
 
 def test_project_chats_are_read_from_the_project_agents_db(client, mercury, tmp_path, monkeypatch):
