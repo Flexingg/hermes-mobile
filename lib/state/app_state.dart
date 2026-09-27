@@ -49,6 +49,16 @@ class AppState extends ChangeNotifier {
   List<GroupChat> _groups = [];
   final Map<String, List<ChatMessage>> _groupMessages = {};
   bool groupSending = false;
+
+  /// The group surface the composer is on (null in a 1:1, project or Plan
+  /// thread). Set when a group page opens, cleared when it closes.
+  String? activeGroupId;
+
+  /// Whether a turn is running on the surface the composer is on: a session's
+  /// `sending` in a thread, a group's `groupSending` in a group. Stop has to act
+  /// on THAT surface's turn, and the two are tracked separately.
+  bool get activeTurnRunning => activeGroupId != null ? groupSending : sending;
+
   StreamSubscription<ChatMessage>? _groupSub;
   List<GroupChat> get groups => List.unmodifiable(_groups);
   List<ChatMessage> groupMessagesFor(String gid) => _groupMessages[gid] ?? [];
@@ -435,6 +445,9 @@ class AppState extends ChangeNotifier {
   }
 
   Future<void> openGroup(String gid) async {
+    // Set before the fetch, so the composer is wired to the surface the user is
+    // looking at even while (or if) its history fails to load.
+    activeGroupId = gid;
     try {
       _groupMessages[gid] = await repo.groupMessages(gid);
       notifyListeners();
@@ -446,6 +459,7 @@ class AppState extends ChangeNotifier {
   Future<void> sendGroupMessage(String gid, String text) async {
     if (groupSending) return;
     groupSending = true;
+    stopStage = 0; // a fresh turn: Stop starts at the top of its two stages
     notifyListeners();
     final userMsg = ChatMessage(
       id: 'u-${DateTime.now().microsecondsSinceEpoch}',
@@ -461,6 +475,7 @@ class AppState extends ChangeNotifier {
     final gWatchdog = Timer(const Duration(seconds: 150), () {
       if (groupSending) {
         groupSending = false;
+        stopStage = 0;
         _groupSub?.cancel();
         _reloadGroupThread(gid);
       }
@@ -480,14 +495,27 @@ class AppState extends ChangeNotifier {
         gWatchdog.cancel();
         error = e.toString();
         groupSending = false;
+        stopStage = 0;
         _reloadGroupThread(gid);
       },
       onDone: () {
         gWatchdog.cancel();
         groupSending = false;
+        stopStage = 0; // the turn is over; Stop goes back to its first shape
         _reloadGroupThread(gid);
       },
     );
+  }
+
+  /// The group page went away: the composer is no longer on a group, so a
+  /// session turn running in the background must not be read as the group's.
+  ///
+  /// Only releases [gid]'s surface: when one group page replaces another, the
+  /// old page's close can land after the new page has opened.
+  void closeGroup(String gid) {
+    if (activeGroupId != gid) return;
+    activeGroupId = null;
+    notifyListeners();
   }
 
   Future<void> _reloadGroupThread(String gid) async {
@@ -634,6 +662,8 @@ class AppState extends ChangeNotifier {
   /// the button changes shape to show it. The second call (after the app has
   /// confirmed) cuts it off wherever it is.
   Future<void> stopTurn({bool hard = false}) async {
+    final gid = activeGroupId;
+    if (gid != null) return _stopGroupTurn(gid, hard: hard);
     final sid = activeSessionId;
     if (sid == null || !sending) return;
     stopStage = hard ? 2 : 1;
@@ -643,6 +673,25 @@ class AppState extends ChangeNotifier {
       if (applied == 'none') {
         // Nothing was running to stop (the reply beat the tap). Say so plainly
         // rather than leaving the button stuck in its stopping shape.
+        stopStage = 0;
+        error = 'Stop did not land — that turn had already finished.';
+      }
+    } catch (e) {
+      stopStage = 0;
+      reportError(e, context: 'stop');
+    }
+    notifyListeners();
+  }
+
+  /// [stopTurn] on a group surface: the same two stages, sent to every agent
+  /// replying in the group.
+  Future<void> _stopGroupTurn(String gid, {required bool hard}) async {
+    if (!groupSending) return;
+    stopStage = hard ? 2 : 1;
+    notifyListeners();
+    try {
+      final applied = await repo.stopGroupTurn(gid, hard: hard);
+      if (applied == 'none') {
         stopStage = 0;
         error = 'Stop did not land — that turn had already finished.';
       }

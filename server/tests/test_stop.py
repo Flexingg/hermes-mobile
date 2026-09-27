@@ -162,3 +162,143 @@ def test_stop_signals_the_cli_turn(client, cli_turn, mode, expected):
     assert r.json()["applied"] == mode
     assert proc.signals == [getattr(sig, expected)]
     holding.set()
+
+
+# -- group chats -----------------------------------------------------------------
+# A group message fans out to every member agent, each its own turn, so the bridge
+# records one handle per agent (keyed `<gid>#<agent>`) and a group Stop acts on
+# all of them through the same _request_stop the session path uses.
+@pytest.fixture
+def group_store(monkeypatch):
+    """Capture what the group path persists instead of writing the group file."""
+    saved = []
+    monkeypatch.setattr(bridge, "_append_group_message", lambda gid, msg: saved.append((gid, msg)))
+    return saved
+
+
+def _group_turn(agent: str = "@hermes") -> threading.Thread:
+    t = threading.Thread(target=bridge._run_group_agent, args=("g1", agent, "hi"), daemon=True)
+    t.start()
+    return t
+
+
+def test_group_stop_graceful_steers_the_agents_run(client, fake_api, broadcasts, group_store):
+    fake_api.pause = threading.Event()
+    t = _group_turn()
+    assert _wait_for_run("g1#@hermes")["run_id"] == "r-1"
+
+    r = client.post("/api/v1/groups/g1/stop", json={"mode": "graceful"}, headers=auth())
+    assert r.status_code == 200
+    assert r.json() == {"ok": True, "mode": "graceful", "applied": "graceful"}
+    assert fake_api.steers == [("r-1", STOP_STEER_NOTE)]
+    assert fake_api.stops == []  # nothing was interrupted
+    got, _ = broadcasts
+    assert ("g1", {"event": "stop_requested", "mode": "graceful", "applied": "graceful"}) in got
+
+    fake_api.pause.set()
+    t.join(5)
+    assert bridge._active_run("g1#@hermes") is None  # the turn is over: nothing left to stop
+
+
+def test_group_stop_hard_interrupts_the_agents_run(client, fake_api, broadcasts, group_store):
+    fake_api.pause = threading.Event()
+    t = _group_turn()
+    _wait_for_run("g1#@hermes")
+
+    r = client.post("/api/v1/groups/g1/stop", json={"mode": "hard"}, headers=auth())
+    assert r.json() == {"ok": True, "mode": "hard", "applied": "hard"}
+    assert fake_api.stops == ["r-1"]
+    assert fake_api.steers == []
+
+    fake_api.pause.set()
+    t.join(5)
+
+
+def test_a_group_reply_on_the_api_server_is_persisted(fake_api, broadcasts, group_store):
+    """There is no session row to read a group reply back from: the group store
+    is the record, so the streamed answer has to land there."""
+    bridge._run_group_agent("g1", "@hermes", "hi")
+    assert len(group_store) == 1
+    gid, msg = group_store[0]
+    assert gid == "g1" and msg["agent"] == "@hermes" and msg["role"] == "assistant"
+    assert msg["text"] == "Hello"
+    got, _ = broadcasts
+    chunks = [p for g, p in got if p.get("event") == "chunk"]
+    assert chunks and all(p["agent"] == "@hermes" for p in chunks)  # tagged for the bubble
+    assert ("g1", {"event": "done", "agent": "@hermes"}) in got
+
+
+def test_group_stop_with_nothing_running_is_not_an_error(client, broadcasts):
+    """An unknown or idle group: nothing to stop, and a Stop never fails mid-turn."""
+    r = client.post("/api/v1/groups/nope/stop", json={"mode": "hard"}, headers=auth())
+    assert r.status_code == 200
+    assert r.json()["applied"] == "none"
+
+
+def test_group_stop_rejects_an_unknown_mode(client):
+    r = client.post("/api/v1/groups/g1/stop", json={"mode": "nuke"}, headers=auth())
+    assert r.status_code == 400
+
+
+def test_group_stop_leaves_other_groups_and_sessions_alone(client, broadcasts):
+    """Stopping g1 must not reach g10's agents or a session's turn."""
+    procs = {k: FakeProc() for k in ("g1#@a", "g1#@b", "g10#@a", "s1")}
+    for key, proc in procs.items():
+        bridge._register_run(key, "dev-hermes-mobile")
+        bridge._set_run_proc(key, proc)
+
+    r = client.post("/api/v1/groups/g1/stop", json={"mode": "graceful"}, headers=auth())
+    assert r.json()["applied"] == "graceful"
+    import signal as sig
+    assert procs["g1#@a"].signals == [sig.SIGINT]
+    assert procs["g1#@b"].signals == [sig.SIGINT]  # every agent in the fan-out
+    assert procs["g10#@a"].signals == []
+    assert procs["s1"].signals == []
+
+
+@pytest.mark.parametrize("mode,expected", [("graceful", "SIGINT"), ("hard", "SIGKILL")])
+def test_group_stop_signals_the_cli_turn_it_recorded(client, monkeypatch, broadcasts,
+                                                     group_store, mode, expected):
+    """A profile the API server does not serve runs on the CLI; Stop signals the
+    process the bridge started for that agent's turn — and nothing else."""
+    import signal as sig
+
+    holding = threading.Event()
+
+    class HeldProc(FakeProc):
+        """The `hermes chat -q` process, alive until it is signalled."""
+        stdout = None
+
+        def send_signal(self, s):
+            super().send_signal(s)
+            holding.set()
+
+        def wait(self):
+            holding.wait(5)
+            return 0
+
+    spawned = []
+
+    def popen(cmd, **kw):
+        spawned.append(HeldProc())
+        return spawned[-1]
+
+    monkeypatch.setattr(bridge.subprocess, "Popen", popen)
+    # A session turn running at the same time: its process is not the group's.
+    bystander = FakeProc()
+    bridge._register_run("s1", "dev-hermes-mobile")
+    bridge._set_run_proc("s1", bystander)
+
+    t = _group_turn("@dev-hermes-mobile")  # not served -> CLI
+    for _ in range(100):
+        if (bridge._active_run("g1#@dev-hermes-mobile") or {}).get("proc"):
+            break
+        time.sleep(0.02)
+
+    r = client.post("/api/v1/groups/g1/stop", json={"mode": mode}, headers=auth())
+    assert r.json()["applied"] == mode
+    assert len(spawned) == 1
+    assert spawned[0].signals == [getattr(sig, expected)]
+    assert bystander.signals == []
+    t.join(5)
+    assert bridge._active_run("g1#@dev-hermes-mobile") is None

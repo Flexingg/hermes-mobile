@@ -668,6 +668,15 @@ class HermesRepository implements AppRepository {
   @override
   Future<void> deleteGroup(String gid) async => _delete('/api/v1/groups/$gid');
 
+  /// Stop the turns running in this group. The bridge stops every agent that is
+  /// replying and reports back which kind of stop actually happened.
+  @override
+  Future<String> stopGroupTurn(String groupId, {bool hard = false}) async {
+    final data = await _post('/api/v1/groups/$groupId/stop',
+        {'mode': hard ? 'hard' : 'graceful'});
+    return '${(data as Map)['applied'] ?? 'none'}';
+  }
+
   // ---- Bots (Hermes profiles) -----------------------------------------
   @override
   Future<List<Bot>> bots() async {

@@ -201,7 +201,7 @@ class _MessageComposerState extends State<MessageComposer> {
                         textInputAction: TextInputAction.newline,
                         onChanged: (_) => setState(() {}),
                         onSubmitted: (_) {
-                          if (!widget.enabled || state.sending) return;
+                          if (!widget.enabled || state.activeTurnRunning) return;
                           _send();
                         },
                         decoration: InputDecoration(
@@ -212,7 +212,7 @@ class _MessageComposerState extends State<MessageComposer> {
                     ),
                   ),
                   const SizedBox(width: 4),
-                  if (state.sending)
+                  if (state.activeTurnRunning)
                     _stopButton(context, state)
                   else if (_hasText)
                     IconButton.filled(

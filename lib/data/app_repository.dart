@@ -69,6 +69,12 @@ abstract class AppRepository {
   Stream<ChatMessage> sendGroupMessage(String gid, String text);
   Future<void> deleteGroup(String gid);
 
+  /// Stops the turns running in this group — the same two-stage Stop the chat
+  /// composer has: `graceful` asks every replying agent to finish the step it is
+  /// on and end, `hard` cuts them off where they are. Returns which one landed
+  /// (`graceful` | `hard` | `none`).
+  Future<String> stopGroupTurn(String groupId, {bool hard = false});
+
   // ---- Bots (Hermes profiles) ----
   Future<List<Bot>> bots();
   Future<List<String>> botPets();

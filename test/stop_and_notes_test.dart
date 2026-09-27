@@ -5,6 +5,7 @@ import 'package:hermes_mobile/data/app_repository.dart';
 import 'package:hermes_mobile/data/models.dart';
 import 'package:hermes_mobile/data/project_models.dart';
 import 'package:hermes_mobile/features/chat/composer.dart';
+import 'package:hermes_mobile/features/chat/group_chat_page.dart';
 import 'package:hermes_mobile/features/projects/project_page.dart';
 import 'package:hermes_mobile/state/app_state.dart';
 import 'package:provider/provider.dart';
@@ -28,6 +29,23 @@ class _Repo implements AppRepository {
     stopCalls.add({'session': sessionId, 'hard': hard});
     return hard ? 'hard' : 'graceful';
   }
+
+  @override
+  Future<String> stopGroupTurn(String groupId, {bool hard = false}) async {
+    stopCalls.add({'group': groupId, 'hard': hard});
+    return hard ? 'hard' : 'graceful';
+  }
+
+  /// A group turn that finishes immediately, so onDone runs.
+  @override
+  Stream<ChatMessage> sendGroupMessage(String gid, String text) =>
+      const Stream<ChatMessage>.empty();
+
+  @override
+  Future<List<ChatMessage>> groupMessages(String gid) async => [];
+
+  @override
+  Future<List<GroupChat>> groups() async => [];
 
   @override
   Future<List<ProjectNote>> projectNotes(String id) async => notes;
@@ -196,6 +214,108 @@ void main() {
     await Future<void>.delayed(Duration.zero);
     expect(state.sending, isFalse);
     expect(state.stopStage, 0);
+  });
+
+  // -- group chats: a group turn is tracked by `groupSending`, not `sending`,
+  // and Stop there goes to the group's agents rather than a session.
+  testWidgets('a group turn shows Stop, and the first tap stops the group',
+      (tester) async {
+    final state = stateWith()
+      ..activeGroupId = 'g1'
+      ..groupSending = true;
+    expect(state.sending, isFalse);
+    await pumpComposer(tester, state);
+
+    expect(find.byKey(const Key('stop-turn')), findsOneWidget);
+    await tester.tap(find.byKey(const Key('stop-turn')));
+    await tester.pump();
+    await tester.pump();
+
+    expect(repo.stopCalls, [
+      {'group': 'g1', 'hard': false}
+    ]);
+    expect(state.stopStage, 1);
+    expect(find.byKey(const Key('stop-kill')), findsOneWidget);
+  });
+
+  testWidgets('the confirmed second tap kills the group turn', (tester) async {
+    final state = stateWith()
+      ..activeGroupId = 'g1'
+      ..groupSending = true
+      ..stopStage = 1;
+    await pumpComposer(tester, state);
+
+    await tester.tap(find.byKey(const Key('stop-kill')));
+    await tester.pumpAndSettle();
+    expect(find.text('Kill it now?'), findsOneWidget);
+    await tester.tap(find.byKey(const Key('stop-kill-confirm')));
+    await tester.pump();
+    await tester.pump();
+
+    expect(repo.stopCalls, [
+      {'group': 'g1', 'hard': true}
+    ]);
+    expect(state.stopStage, 2);
+  });
+
+  testWidgets('on an idle group, a background session turn shows no Stop',
+      (tester) async {
+    final state = stateWith()
+      ..activeSessionId = 's1'
+      ..sending = true
+      ..activeGroupId = 'g1';
+    await pumpComposer(tester, state);
+    expect(find.byKey(const Key('stop-turn')), findsNothing);
+  });
+
+  test('a finished group turn puts Stop back to its first stage', () async {
+    final state = stateWith()
+      ..activeGroupId = 'g1'
+      ..stopStage = 2;
+    await state.sendGroupMessage('g1', 'hi');
+    await Future<void>.delayed(Duration.zero);
+    expect(state.groupSending, isFalse);
+    expect(state.stopStage, 0);
+  });
+
+  testWidgets('the group page says the stage and releases the surface when it '
+      'closes', (tester) async {
+    final state = stateWith();
+    await tester.pumpWidget(MaterialApp(
+      home: ChangeNotifierProvider<AppState>.value(
+        value: state,
+        child: const GroupChatPage(groupId: 'g1', name: 'crew', agents: ['@hermes']),
+      ),
+    ));
+    await tester.pump();
+    expect(state.activeGroupId, 'g1');
+
+    state
+      ..groupSending = true
+      ..stopStage = 1;
+    state.notifyListeners();
+    await tester.pump();
+    expect(find.text('Stopping after this step…'), findsOneWidget);
+    expect(find.byKey(const Key('stop-kill')), findsOneWidget);
+
+    await tester.pumpWidget(const SizedBox());
+    await tester.pump();
+    expect(state.activeGroupId, isNull);
+  });
+
+  test('leaving a group hands Stop back to the session', () async {
+    final state = stateWith()..activeSessionId = 's1';
+    await state.openGroup('g1');
+    expect(state.activeGroupId, 'g1');
+    state.closeGroup('g2'); // another page's close: not this surface
+    expect(state.activeGroupId, 'g1');
+    state.closeGroup('g1');
+    expect(state.activeGroupId, isNull);
+    state.sending = true;
+    await state.stopTurn();
+    expect(repo.stopCalls, [
+      {'session': 's1', 'hard': false}
+    ]);
   });
 
   testWidgets('the Notes tab is the user\'s own scratch space', (tester) async {

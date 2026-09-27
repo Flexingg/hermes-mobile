@@ -394,6 +394,34 @@ def test_a_group_chat_turn_carries_the_rule_too(monkeypatch):
     assert prompt.endswith("how's lumen doing?")  # the user's words survive intact
 
 
+def test_a_group_chat_turn_on_the_api_server_carries_the_rule_as_a_system_message(monkeypatch):
+    """The API-server transport has a system message, so there the rule rides in
+    it and the user's words go through untouched — and no CLI process is started."""
+    sent = {}
+
+    class ServedApi:
+        def serves(self, profile):
+            return True
+
+        def available(self):
+            return True
+
+        def stream_turn(self, text, emit, profile=None, system=None, on_run=None):
+            sent.update(text=text, profile=profile, system=system)
+            return "api_new"
+
+    monkeypatch.setattr(bridge, "HERMES_API", ServedApi())
+    monkeypatch.setattr(bridge.subprocess, "Popen",
+                        lambda *a, **k: pytest.fail("the API path must not spawn `hermes chat`"))
+    monkeypatch.setattr(bridge, "_broadcast", lambda *a, **k: None)
+    monkeypatch.setattr(bridge, "_append_group_message", lambda *a, **k: None)
+    bridge._run_group_agent("g1", "somebot", "how's lumen doing?")
+    assert sent["text"] == "how's lumen doing?"
+    assert sent["profile"] == "somebot"
+    assert sent["system"].startswith("[Mercury chat] ")
+    assert "never straight from this chat" in sent["system"]
+
+
 def test_intents_need_the_api_server(client, mercury, monkeypatch):
     monkeypatch.setattr(bridge, "HERMES_API", HermesApi(Path("/nonexistent"), key=""))
     r = client.post("/api/v1/hermes/intent", json={"kind": "pause"}, headers=auth())

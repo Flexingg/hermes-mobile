@@ -253,6 +253,20 @@ class HermesApi:
         finally:
             conn.close()
 
+    def stream_turn(self, text: str, emit: Callable[[dict], None],
+                    profile: str | None = None, system: str | None = None,
+                    on_run: Callable[[str], None] | None = None) -> str:
+        """One turn for a caller that has no Hermes session of its own.
+
+        The gateway runs every turn against a session, so create one, stream the
+        turn into it and hand its id back. Relay contract is stream_chat's:
+        HermesApiError with started=False when nothing was relayed yet, so the
+        caller can still fall back to the CLI.
+        """
+        sid = self.create_session(profile=profile)
+        self.stream_chat(sid, text, emit, profile=profile, system=system, on_run=on_run)
+        return sid
+
 
     # -- live turn control ---------------------------------------------------
     def steer_run(self, run_id: str, text: str, profile: str | None = None) -> bool:

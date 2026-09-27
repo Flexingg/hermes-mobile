@@ -25,18 +25,26 @@ class GroupChatPage extends StatefulWidget {
 
 class _GroupChatPageState extends State<GroupChatPage> {
   final _scroll = ScrollController();
+  late final AppState _state;
 
   @override
   void initState() {
     super.initState();
+    // Held so dispose() can release the group surface without a context.
+    _state = context.read<AppState>();
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      context.read<AppState>().openGroup(widget.groupId);
+      _state.openGroup(widget.groupId);
       _jumpToBottom();
     });
   }
 
   @override
   void dispose() {
+    // Release the group surface, so a session turn running in the background is
+    // not read as this group's. After this frame: listeners cannot be notified
+    // while the tree is being torn down.
+    final gid = widget.groupId;
+    Future.microtask(() => _state.closeGroup(gid));
     _scroll.dispose();
     super.dispose();
   }
@@ -114,7 +122,7 @@ class _GroupChatPageState extends State<GroupChatPage> {
                     },
                   ),
           ),
-          if (state.groupSending) _groupBar(context),
+          if (state.groupSending) _groupBar(context, state),
           MessageComposer(
             enabled: !state.groupSending,
             onSend: (t) => state.sendGroupMessage(widget.groupId, t),
@@ -124,7 +132,7 @@ class _GroupChatPageState extends State<GroupChatPage> {
     );
   }
 
-  Widget _groupBar(BuildContext context) {
+  Widget _groupBar(BuildContext context, AppState state) {
     final scheme = Theme.of(context).colorScheme;
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
@@ -133,7 +141,12 @@ class _GroupChatPageState extends State<GroupChatPage> {
           const SizedBox(
               width: 14, height: 14, child: CircularProgressIndicator(strokeWidth: 2)),
           const SizedBox(width: 10),
-          Text('Agents are replying…',
+          Text(
+              state.stoppingHard
+                  ? 'Stopping now…'
+                  : state.stopRequested
+                      ? 'Stopping after this step…'
+                      : 'Agents are replying…',
               style: TextStyle(fontSize: 12, color: scheme.onSurfaceVariant)),
         ],
       ),

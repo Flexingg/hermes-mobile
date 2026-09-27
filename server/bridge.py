@@ -814,18 +814,89 @@ def _group_prompt(text: str) -> str:
     return f"[Mercury chat] {_CHAT_GENERAL_NOTE}\n\n{text}"
 
 
+def _group_system() -> str:
+    """The chat rule for a group turn on the API server.
+
+    That transport has a system message, so the rule rides there and the user's
+    words reach the agent untouched; the CLI fallback prefixes the text instead
+    (_group_prompt).
+    """
+    return f"[Mercury chat] {_CHAT_GENERAL_NOTE}"
+
+
+def _group_turn_key(gid: str, agent: str) -> str:
+    """The ACTIVE_RUNS key for one agent's turn inside a group fan-out.
+
+    A group message is N turns, not one (each member agent runs its own reply),
+    so each needs its own recorded handle. `#` cannot appear in a session id, so
+    the two key spaces cannot collide.
+    """
+    return f"{gid}#{agent}"
+
+
+def _group_emit(gid: str, agent: str, acc: dict, chunk: dict) -> None:
+    """Relay one API-server chunk to the group, tagged with its agent, and keep
+    the answer text — the group store is where this reply is persisted."""
+    if chunk.get("type") == "answer":
+        acc["text"] += chunk.get("delta") or ""
+    _broadcast(gid, {**chunk, "agent": agent})
+
+
 def _run_group_agent(gid: str, agent: str, text: str) -> None:
     _broadcast(gid, {"event": "start", "agent": agent})
-    cmd = [HERMES_BIN, "chat", "-q", _group_prompt(text), "-Q"]
     profile = _profile_for(agent)
+    acc = {"text": ""}
+    key = _group_turn_key(gid, agent)
+    # Registered before the turn starts, exactly as the session path does: a Stop
+    # that lands in the first moments must find something to act on.
+    _register_run(key, profile)
+    try:
+        if HERMES_API.serves(profile) and HERMES_API.available():
+            try:
+                HERMES_API.stream_turn(
+                    text, lambda c: _group_emit(gid, agent, acc, c),
+                    profile=profile, system=_group_system(),
+                    on_run=lambda rid: _set_run_id(key, rid),
+                )
+            except HermesApiError as e:
+                if e.started:
+                    # Part of the reply is already on screen: answering again
+                    # through the CLI would answer twice. Say what broke.
+                    _broadcast(gid, {"event": "chunk", "agent": agent, "type": "technical",
+                                     "delta": f"⚠ {e}\n"})
+                else:
+                    print(f"[bridge] API server did not take the group turn ({e}); using the CLI",
+                          flush=True)
+                    _run_group_agent_cli(gid, agent, text, profile, acc)
+        else:
+            _run_group_agent_cli(gid, agent, text, profile, acc)
+    finally:
+        _clear_run(key)
+    _append_group_message(gid, {
+        "id": f"g-{int(time.time() * 1000)}-{agent}",
+        "role": "assistant",
+        "agent": agent,
+        "text": _strip_media(acc["text"]),
+        "timestamp": _iso(_now()),
+        "media": _media_in(acc["text"]),
+    })
+    _broadcast(gid, {"event": "done", "agent": agent})
+
+
+def _run_group_agent_cli(gid: str, agent: str, text: str, profile: str | None,
+                         acc: dict) -> None:
+    """The group turn on the original transport: one `hermes chat -q` process."""
+    cmd = [HERMES_BIN, "chat", "-q", _group_prompt(text), "-Q"]
     if profile:
         cmd += ["-p", profile]
-    acc = ""
     try:
         proc = subprocess.Popen(
             cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
             stdin=subprocess.DEVNULL, start_new_session=True,
         )
+        # Let Stop reach this agent's turn: it has no run id here, so the process
+        # is the handle — and the only one _request_stop will ever signal.
+        _set_run_proc(_group_turn_key(gid, agent), proc)
         if proc.stdout is not None:
             state = {"thinking": False, "sent": text}
             for line in proc.stdout:
@@ -838,19 +909,10 @@ def _run_group_agent(gid: str, agent: str, text: str) -> None:
                 _broadcast(gid, {"event": "chunk", "agent": agent,
                                 "type": t, "delta": line + "\n"})
                 if t == "answer":
-                    acc += line + "\n"
+                    acc["text"] += line + "\n"
         proc.wait()
     except Exception:
         pass
-    _append_group_message(gid, {
-        "id": f"g-{int(time.time() * 1000)}-{agent}",
-        "role": "assistant",
-        "agent": agent,
-        "text": _strip_media(acc),
-        "timestamp": _iso(_now()),
-        "media": _media_in(acc),
-    })
-    _broadcast(gid, {"event": "done", "agent": agent})
 
 
 @app.post("/api/v1/sessions")
@@ -1080,6 +1142,24 @@ def _request_stop(session_id: str, *, hard: bool) -> str:
     return "none"
 
 
+def _group_active_runs(gid: str) -> list[str]:
+    """The ACTIVE_RUNS keys of the agents replying in this group right now."""
+    with _ACTIVE_LOCK:
+        return [k for k in ACTIVE_RUNS if k.startswith(f"{gid}#")]
+
+
+def _request_group_stop(gid: str, *, hard: bool) -> str:
+    """Stop every agent replying in this group. Same contract as _request_stop:
+    "graceful" (each run was steered, its current step finishes), "hard" (each run
+    was interrupted), or "none" (nothing in this group was running).
+    """
+    applied = "none"
+    for key in _group_active_runs(gid):
+        if _request_stop(key, hard=hard) != "none":
+            applied = "hard" if hard else "graceful"
+    return applied
+
+
 @app.post("/api/v1/sessions/{session_id}/stop")
 def stop_turn(session_id: str, body: dict | None = None):
     """Stop the turn running on this session.
@@ -1093,6 +1173,25 @@ def stop_turn(session_id: str, body: dict | None = None):
         raise HTTPException(status_code=400, detail="mode must be 'graceful' or 'hard'")
     applied = _request_stop(session_id, hard=(mode == "hard"))
     _broadcast(session_id, {"event": "stop_requested", "mode": mode, "applied": applied})
+    return {"ok": True, "mode": mode, "applied": applied}
+
+
+@app.post("/api/v1/groups/{gid}/stop")
+def stop_group_turn(gid: str, body: dict | None = None):
+    """Stop the turns running in this group chat.
+
+    Same two stages as a session's Stop, applied to every agent replying:
+    `mode: "graceful"` (default) asks each one to finish the step it is on and end
+    its turn; `mode: "hard"` cuts them off wherever they are. The app sends
+    graceful on the first tap and hard on the confirmed second one. An unknown
+    group is not an error — nothing is running there, so the answer is "none",
+    exactly as a session with nothing running answers.
+    """
+    mode = str((body or {}).get("mode") or "graceful").lower()
+    if mode not in ("graceful", "hard"):
+        raise HTTPException(status_code=400, detail="mode must be 'graceful' or 'hard'")
+    applied = _request_group_stop(gid, hard=(mode == "hard"))
+    _broadcast(gid, {"event": "stop_requested", "mode": mode, "applied": applied})
     return {"ok": True, "mode": mode, "applied": applied}
 
 
