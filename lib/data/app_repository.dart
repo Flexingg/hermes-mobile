@@ -41,6 +41,14 @@ abstract class AppRepository {
   /// file. Returns the local file path on the device.
   Future<String> downloadFile(String serverPath);
 
+  /// Stops the turn running on this session, and says what was actually done:
+  /// `graceful` (it will finish the step it is on and end), `hard` (cut off
+  /// where it is) or `none` (nothing was running).
+  ///
+  /// The first tap of Stop is graceful, so the reply stays a coherent answer
+  /// instead of a torn-off fragment; the confirmed second tap is hard.
+  Future<String> stopTurn(String sessionId, {bool hard = false});
+
   /// Web URL that serves an agent-produced file as an in-app preview
   /// (HTML/CSS/JS render interactively; relative assets resolve on the bridge).
   String previewUrl(String filePath);
@@ -113,6 +121,12 @@ abstract class AppRepository {
   Future<Project> project(String id);
   /// The project agent's own chats (Chat and Plan).
   Future<List<ChatSession>> projectSessions(String id);
+  /// The user's own notes for a project. Separate from the agent's memory on
+  /// purpose: a note is never injected into a prompt.
+  Future<List<ProjectNote>> projectNotes(String id);
+  Future<ProjectNote> addProjectNote(String id, String text);
+  Future<ProjectNote> editProjectNote(String id, String noteId, String text);
+  Future<void> deleteProjectNote(String id, String noteId);
   Future<List<GithubRepo>> githubRepos();
   Future<AgentSnapshot> agents();
   /// The orchestrator's chat (the pinned "Hermes" conversation).

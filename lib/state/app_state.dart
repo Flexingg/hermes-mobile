@@ -25,6 +25,17 @@ class AppState extends ChangeNotifier {
   String? activeSessionId;
   bool sending = false;
 
+  /// How far the user has taken Stop on the turn that is running.
+  /// 0 = not asked, 1 = asked it to finish the step it is on and end,
+  /// 2 = the kill is confirmed and on its way.
+  ///
+  /// It lives here (not in the composer) so the button keeps its shape across
+  /// rebuilds, and so the sending bar can say what is actually happening.
+  int stopStage = 0;
+
+  bool get stopRequested => stopStage > 0;
+  bool get stoppingHard => stopStage == 2;
+
   // Optimistic new-chat flow: a thread opens under a temp id, then swaps to
   // the real session once the bridge creates it.
   String? _newChatTargetId;
@@ -72,6 +83,7 @@ class AppState extends ChangeNotifier {
   final Map<String, Project> _projectDetail = {};
   final Map<String, List<ChatSession>> _projectSessions = {};
   final Map<String, List<MemoryEntry>> _projectMemory = {};
+  final Map<String, List<ProjectNote>> _projectNotes = {};
   List<GithubRepo> githubRepos = [];
   AgentSnapshot? agents;
   String? orchestratorSessionId;
@@ -91,6 +103,7 @@ class AppState extends ChangeNotifier {
 
   List<ChatSession> projectSessionsFor(String id) => _projectSessions[id] ?? const [];
   List<MemoryEntry> projectMemoryFor(String profile) => _projectMemory[profile] ?? const [];
+  List<ProjectNote> projectNotesFor(String id) => _projectNotes[id] ?? const [];
   bool intentPending(String key) => _pendingIntents.contains(key);
   String? filedDraftReply(String messageId) => _filedDrafts[messageId];
 
@@ -273,6 +286,7 @@ class AppState extends ChangeNotifier {
     _projectDetail.clear();
     _projectSessions.clear();
     _projectMemory.clear();
+    _projectNotes.clear();
     githubRepos = [];
     agents = null;
     orchestratorSessionId = null;
@@ -544,6 +558,7 @@ class AppState extends ChangeNotifier {
     final sid = activeSessionId;
     if (sid == null || sending) return;
     sending = true;
+    stopStage = 0; // a fresh turn: Stop starts at the top of its two stages
     notifyListeners();
 
     final userMsg = ChatMessage(
@@ -564,6 +579,7 @@ class AppState extends ChangeNotifier {
     final watchdog = Timer(const Duration(seconds: 150), () {
       if (sending) {
         sending = false;
+        stopStage = 0;
         _sub?.cancel();
         _reloadThread(sid);
       }
@@ -585,10 +601,12 @@ class AppState extends ChangeNotifier {
       watchdog.cancel();
       error = e.toString();
       sending = false;
+      stopStage = 0;
       _reloadThread(sid);
     }, onDone: () {
       watchdog.cancel();
       sending = false;
+      stopStage = 0; // the turn is over; Stop goes back to its first shape
       _sub = null;
       // If notifications are enabled, ping when the assistant reply lands.
       if (config.notificationsEnabled) {
@@ -607,6 +625,32 @@ class AppState extends ChangeNotifier {
       notifyListeners();
       refreshSessions();
     });
+  }
+
+  /// Stop the turn that is running on this session.
+  ///
+  /// Two stages, as asked for: the first call is graceful — the agent finishes
+  /// the step it is on and then ends the turn, so the reply stays coherent — and
+  /// the button changes shape to show it. The second call (after the app has
+  /// confirmed) cuts it off wherever it is.
+  Future<void> stopTurn({bool hard = false}) async {
+    final sid = activeSessionId;
+    if (sid == null || !sending) return;
+    stopStage = hard ? 2 : 1;
+    notifyListeners();
+    try {
+      final applied = await repo.stopTurn(sid, hard: hard);
+      if (applied == 'none') {
+        // Nothing was running to stop (the reply beat the tap). Say so plainly
+        // rather than leaving the button stuck in its stopping shape.
+        stopStage = 0;
+        error = 'Stop did not land — that turn had already finished.';
+      }
+    } catch (e) {
+      stopStage = 0;
+      reportError(e, context: 'stop');
+    }
+    notifyListeners();
   }
 
   /// Reload a thread's messages from the server and refresh the session list.
@@ -835,9 +879,9 @@ class AppState extends ChangeNotifier {
   Future<String?> linkRepo(String repoName, {String coder = 'claude'}) =>
       _intent('link:$repoName', 'link_repo', payload: {'repo': repoName, 'coder': coder});
 
-  Future<String?> setProject(String id, {String? coder, String? gates}) =>
+  Future<String?> setProject(String id, {String? coder, String? gates, String? pushPolicy}) =>
       _intent('set:$id', 'set_project', project: id,
-          payload: {'coder': ?coder, 'gates': ?gates});
+          payload: {'coder': ?coder, 'gates': ?gates, 'pushPolicy': ?pushPolicy});
 
   Future<String?> unlinkProject(String id) async {
     final r = await _intent('unlink:$id', 'unlink', project: id);
@@ -850,6 +894,11 @@ class AppState extends ChangeNotifier {
 
   Future<String?> cancelTask(String project, String task) =>
       _intent('task:$task', 'cancel_task', project: project, payload: {'task': task});
+
+  /// "Push it": the project is set to test-first and this task is parked with its
+  /// build. The user has tested it, so Hermes re-runs publish with --approved.
+  Future<String?> pushTask(String project, String task) =>
+      _intent('push:$task', 'push_task', project: project, payload: {'task': task});
 
   /// "Suggest edits" on a task: Hermes puts the note back on the task's worker
   /// (same branch, same PR) — or, when the PR is already merged, hands it to the
@@ -905,6 +954,32 @@ class AppState extends ChangeNotifier {
   Future<void> deleteProjectMemory(String profile, String id) async {
     await repo.deleteMemory(id, profile: profile);
     await loadProjectMemory(profile);
+  }
+
+  /// The user's own notes for a project — not the agent's memory. Kept in their
+  /// own map so the two can never be confused on screen.
+  Future<void> loadProjectNotes(String projectId) async {
+    try {
+      _projectNotes[projectId] = await repo.projectNotes(projectId);
+    } catch (e) {
+      reportError(e, context: 'load notes');
+    }
+    notifyListeners();
+  }
+
+  Future<void> addProjectNote(String projectId, String text) async {
+    await repo.addProjectNote(projectId, text);
+    await loadProjectNotes(projectId);
+  }
+
+  Future<void> editProjectNote(String projectId, String noteId, String text) async {
+    await repo.editProjectNote(projectId, noteId, text);
+    await loadProjectNotes(projectId);
+  }
+
+  Future<void> deleteProjectNote(String projectId, String noteId) async {
+    await repo.deleteProjectNote(projectId, noteId);
+    await loadProjectNotes(projectId);
   }
 
   Color avatarColorFor(String sessionId) {

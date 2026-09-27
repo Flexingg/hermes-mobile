@@ -418,6 +418,11 @@ class HermesRepository implements AppRepository {
         });
         continue;
       }
+      // The bridge also announces a Stop to everyone watching this session
+      // ("stop_requested"), including the device that asked. It is not reply
+      // text: rendering it would put an empty bubble in the thread. The Stop
+      // UI's own state is per-device and lives in AppState.
+      if (event == 'stop_requested') continue;
       final type = (data['type'] as String?) ?? 'answer';
       final delta = data['delta'] as String? ?? '';
       if (type != curType) {
@@ -556,6 +561,16 @@ class HermesRepository implements AppRepository {
   Future<List<ChatSession>> searchSessions(String query) async =>
       sessions().then((s) => s.where((x) =>
           x.title.toLowerCase().contains(query.toLowerCase())).toList());
+
+  /// Stop the turn running on this session. The bridge does the stopping: it
+  /// steers the live run (graceful) or interrupts it (hard), and reports back
+  /// which one actually happened.
+  @override
+  Future<String> stopTurn(String sessionId, {bool hard = false}) async {
+    final data = await _post('/api/v1/sessions/$sessionId/stop',
+        {'mode': hard ? 'hard' : 'graceful'});
+    return '${(data as Map)['applied'] ?? 'none'}';
+  }
 
   // ---- Groups (multi-agent chat) --------------------------------------
   @override
@@ -807,6 +822,32 @@ class HermesRepository implements AppRepository {
   Future<List<Project>> projects() async => (await _get('/api/v1/projects') as List)
       .map((j) => Project.fromJson((j as Map).cast<String, dynamic>()))
       .toList();
+
+  // Notes are yours: the bridge keeps them beside the registry and never feeds
+  // them to a model. Deliberately separate from the project's Memory, which is
+  // injected into the agent's prompt on every turn.
+  @override
+  Future<List<ProjectNote>> projectNotes(String id) async =>
+      (await _get('/api/v1/projects/${Uri.encodeComponent(id)}/notes') as List)
+          .map((j) => ProjectNote.fromJson((j as Map).cast<String, dynamic>()))
+          .toList();
+
+  @override
+  Future<ProjectNote> addProjectNote(String id, String text) async =>
+      ProjectNote.fromJson((await _post('/api/v1/projects/${Uri.encodeComponent(id)}/notes',
+              {'text': text}) as Map)
+          .cast<String, dynamic>());
+
+  @override
+  Future<ProjectNote> editProjectNote(String id, String noteId, String text) async =>
+      ProjectNote.fromJson((await _patch(
+              '/api/v1/projects/${Uri.encodeComponent(id)}/notes/${Uri.encodeComponent(noteId)}',
+              {'text': text}) as Map)
+          .cast<String, dynamic>());
+
+  @override
+  Future<void> deleteProjectNote(String id, String noteId) async => _delete(
+      '/api/v1/projects/${Uri.encodeComponent(id)}/notes/${Uri.encodeComponent(noteId)}');
 
   @override
   Future<Project> project(String id) async => Project.fromJson(
