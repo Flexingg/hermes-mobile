@@ -358,6 +358,13 @@ class _ChatThreadPageState extends State<ChatThreadPage> {
       builder: (context) => SafeArea(
         child: Wrap(
           children: [
+            if (widget.project != null && !s.title.startsWith('Plan'))
+              ListTile(
+                key: const Key('turn-into-plan'),
+                leading: const Icon(Icons.lightbulb_outline),
+                title: const Text('Turn into plan'),
+                onTap: () => Navigator.pop(context, 'plan'),
+              ),
             ListTile(
               leading: Icon(s.pinned ? Icons.push_pin : Icons.push_pin_outlined),
               title: Text(s.pinned ? 'Unpin' : 'Pin'),
@@ -385,6 +392,14 @@ class _ChatThreadPageState extends State<ChatThreadPage> {
     );
     if (action == null || !mounted) return;
     switch (action) {
+      case 'plan':
+        final p = widget.project!;
+        final sid = await state.planFromChat(p, s);
+        if (sid == null || !context.mounted) return;
+        Navigator.of(context).push(MaterialPageRoute(
+            builder: (_) => ChatThreadPage(
+                sessionId: sid, name: p.name, project: p, planMode: true)));
+        break;
       case 'pin':
         await state.togglePinned(s.id);
         break;

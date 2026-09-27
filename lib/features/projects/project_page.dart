@@ -2,6 +2,7 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import '../../core/util/format.dart';
+import '../../data/models.dart';
 import '../../data/project_models.dart';
 import '../../state/app_state.dart';
 import '../chat/chat_thread_page.dart';
@@ -123,6 +124,16 @@ class _ChatsTab extends StatelessWidget {
             sessionId: sid, name: project.name, project: project, planMode: plan)));
   }
 
+  /// Hand an existing chat to a new Plan chat and open it on Plan.
+  Future<void> _plan(BuildContext context, ChatSession source) async {
+    final state = context.read<AppState>();
+    final sid = await state.planFromChat(project, source);
+    if (sid == null || !context.mounted) return;
+    Navigator.of(context).push(MaterialPageRoute(
+        builder: (_) => ChatThreadPage(
+            sessionId: sid, name: project.name, project: project, planMode: true)));
+  }
+
   @override
   Widget build(BuildContext context) {
     final state = context.watch<AppState>();
@@ -167,8 +178,18 @@ class _ChatsTab extends StatelessWidget {
                     subtitle: s.lastPreview.isEmpty
                         ? null
                         : Text(s.lastPreview, maxLines: 1, overflow: TextOverflow.ellipsis),
-                    trailing: Text(formatRelativeTime(s.lastTimestamp),
-                        style: TextStyle(fontSize: 11, color: scheme.outline)),
+                    trailing: Row(mainAxisSize: MainAxisSize.min, children: [
+                      Text(formatRelativeTime(s.lastTimestamp),
+                          style: TextStyle(fontSize: 11, color: scheme.outline)),
+                      if (!s.title.startsWith('Plan') && s.lastPreview.trim().isNotEmpty)
+                        IconButton(
+                          key: Key('turn-into-plan-${s.id}'),
+                          tooltip: 'Turn into plan',
+                          icon: Icon(Icons.lightbulb_outline, size: 20, color: scheme.onSurfaceVariant),
+                          visualDensity: VisualDensity.compact,
+                          onPressed: () => _plan(context, s),
+                        ),
+                    ]),
                     onTap: () => Navigator.of(context).push(MaterialPageRoute(
                         builder: (_) => ChatThreadPage(
                             sessionId: s.id,

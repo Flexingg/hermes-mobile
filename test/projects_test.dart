@@ -10,6 +10,7 @@ import 'package:hermes_mobile/data/models.dart';
 import 'package:hermes_mobile/data/project_models.dart';
 import 'package:hermes_mobile/features/chat/chat_thread_page.dart';
 import 'package:hermes_mobile/features/projects/link_repo_sheet.dart';
+import 'package:hermes_mobile/features/projects/project_page.dart';
 import 'package:hermes_mobile/features/projects/projects_page.dart';
 import 'package:hermes_mobile/state/app_state.dart';
 import 'package:http/http.dart' as http;
@@ -24,13 +25,29 @@ class FakeRepo implements AppRepository {
   Map<String, List<ChatMessage>> threads = {};
   final List<Map<String, Object?>> intents = [];
   final Completer<void> intentGate = Completer<void>()..complete();
+  List<ChatSession> projectChats = [];
+  final List<(String, String?)> created = [];
+  final List<Map<String, Object?>> sends = [];
 
   @override
   Future<List<Project>> projects() async => projectList;
   @override
   Future<Project> project(String id) async => projectList.firstWhere((p) => p.id == id);
   @override
-  Future<List<ChatSession>> projectSessions(String id) async => const [];
+  Future<List<ChatSession>> projectSessions(String id) async => projectChats;
+  @override
+  Future<ChatSession> createSession(String title, String? profileId) async {
+    created.add((title, profileId));
+    return ChatSession(
+        id: 'plan-new', title: title, lastPreview: '', lastTimestamp: DateTime.now(),
+        profileId: profileId ?? 'hermes');
+  }
+  @override
+  Stream<ChatMessage> sendMessage(String sessionId, String text,
+      {List<Attachment> attachments = const [], String? mode, String? project, String? profile}) {
+    sends.add({'sessionId': sessionId, 'text': text, 'mode': mode, 'project': project, 'profile': profile});
+    return const Stream<ChatMessage>.empty();
+  }
   @override
   Future<List<GithubRepo>> githubRepos() async => repos;
   @override
@@ -48,7 +65,7 @@ class FakeRepo implements AppRepository {
   @override
   Future<List<ChatMessage>> messages(String sessionId) async => threads[sessionId] ?? const [];
   @override
-  Future<List<ChatSession>> sessions() async => const [];
+  Future<List<ChatSession>> sessions() async => projectChats;
   @override
   Future<List<MemoryEntry>> memoryEntries({String? category, String? profile}) async => const [];
 
@@ -246,5 +263,88 @@ void main() {
     expect(find.byKey(const Key('create-issue')), findsNothing); // filed: no second tap
 
     await tester.pumpWidget(const SizedBox()); // dispose: stops the thread poll
+  });
+
+  ChatSession chat(String id, String title, String preview) => ChatSession(
+      id: id, title: title, lastPreview: preview, lastTimestamp: DateTime(2026, 9, 26),
+      profileId: 'dev-lumen');
+
+  testWidgets('Turn into plan opens a new Plan chat that names the source chat', (tester) async {
+    final source = ChatMessage(
+        id: '1', sessionId: 'c1', role: ChatMessageRole.user, text: 'Rex needs a streak',
+        timestamp: DateTime(2026, 9, 26));
+    final repo = FakeRepo()
+      ..projectList = [project('lumen')]
+      ..projectChats = [chat('c1', 'Liftosaurus-Rex', 'Rex needs a streak')]
+      ..threads = {'c1': [source]};
+    final state = await stateWith(repo);
+    await tester.pumpWidget(host(state, const ProjectPage(projectId: 'lumen')));
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.byKey(const Key('turn-into-plan-c1')));
+    await tester.pumpAndSettle();
+
+    expect(repo.created, [('Plan · lumen', 'dev-lumen')]);
+    final send = repo.sends.single;
+    expect(send['sessionId'], 'plan-new');
+    expect((send['mode'], send['project'], send['profile']), ('plan', 'lumen', 'dev-lumen'));
+    expect(send['text'], allOf(contains('Liftosaurus-Rex'), contains('c1')));
+
+    // the source chat is only named, never written to
+    expect(repo.threads['c1'], [source]);
+    expect(repo.projectChats.single.title, 'Liftosaurus-Rex');
+    expect(state.messagesFor('c1'), isEmpty);
+
+    // the new thread opens with the switch on Plan
+    expect(find.byType(ChatThreadPage), findsOneWidget);
+    expect(find.text('Plan mode · Flexingg/lumen'), findsOneWidget);
+
+    await tester.pumpWidget(const SizedBox()); // dispose: stops the poll timers
+  });
+
+  testWidgets('A Plan chat offers no Turn into plan', (tester) async {
+    final repo = FakeRepo()
+      ..projectList = [project('lumen')]
+      ..projectChats = [chat('p1', 'Plan · lumen', 'Here is the plan.')];
+    final state = await stateWith(repo);
+    await tester.pumpWidget(host(state, const ProjectPage(projectId: 'lumen')));
+    await tester.pumpAndSettle();
+
+    expect(find.text('Plan · lumen'), findsOneWidget);
+    expect(find.byKey(const Key('turn-into-plan-p1')), findsNothing);
+
+    await tester.pumpWidget(const SizedBox()); // dispose: stops the poll timer
+  });
+
+  testWidgets("The thread's menu offers Turn into plan, except in a Plan chat", (tester) async {
+    final lumen = project('lumen');
+    final repo = FakeRepo()
+      ..projectList = [lumen]
+      ..projectChats = [chat('c1', 'Liftosaurus-Rex', 'Rex needs a streak'),
+                        chat('p1', 'Plan · lumen', 'Here is the plan.')];
+    final state = await stateWith(repo);
+    await state.refreshSessions();
+
+    await tester.pumpWidget(host(state, ChatThreadPage(sessionId: 'p1', name: 'lumen', project: lumen)));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byIcon(Icons.more_vert));
+    await tester.pumpAndSettle();
+    expect(find.text('Pin'), findsOneWidget);
+    expect(find.byKey(const Key('turn-into-plan')), findsNothing);
+
+    await tester.pumpWidget(const SizedBox());
+    await tester.pumpWidget(host(state, ChatThreadPage(sessionId: 'c1', name: 'lumen', project: lumen)));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byIcon(Icons.more_vert));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const Key('turn-into-plan')));
+    await tester.pumpAndSettle();
+
+    expect(repo.created, [('Plan · lumen', 'dev-lumen')]);
+    expect(repo.sends.single['sessionId'], 'plan-new');
+    expect(repo.sends.single['mode'], 'plan');
+    expect(find.text('Plan mode · Flexingg/lumen'), findsOneWidget);
+
+    await tester.pumpWidget(const SizedBox()); // dispose: stops the thread polls
   });
 }
