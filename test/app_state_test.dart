@@ -2,6 +2,8 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:hermes_mobile/core/config/app_config.dart';
 import 'package:hermes_mobile/data/api_failure.dart';
 import 'package:hermes_mobile/data/app_repository.dart';
+import 'package:hermes_mobile/data/models.dart';
+import 'package:hermes_mobile/data/project_models.dart';
 import 'package:hermes_mobile/state/app_state.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
@@ -13,6 +15,38 @@ class _ExplodingRepo implements AppRepository {
 
   @override
   dynamic noSuchMethod(Invocation invocation) => Future<Never>.error(failure);
+}
+
+/// Records the calls Turn into plan makes, in order; anything else is a test bug.
+class _PlanRepo implements AppRepository {
+  final List<String> calls = [];
+  final List<Map<String, Object?>> sends = [];
+
+  @override
+  Future<ChatSession> createSession(String title, String? profileId) async {
+    calls.add('createSession:$title:$profileId');
+    return ChatSession(
+        id: 'plan-new', title: title, lastPreview: '', lastTimestamp: DateTime.now(),
+        profileId: profileId ?? 'hermes');
+  }
+
+  @override
+  Future<List<ChatSession>> projectSessions(String id) async => const [];
+
+  @override
+  Future<List<ChatSession>> sessions() async => const [];
+
+  @override
+  Stream<ChatMessage> sendMessage(String sessionId, String text,
+      {List<Attachment> attachments = const [], String? mode, String? project, String? profile}) {
+    calls.add('send:$sessionId');
+    sends.add({'text': text, 'mode': mode, 'project': project, 'profile': profile});
+    return const Stream<ChatMessage>.empty();
+  }
+
+  @override
+  dynamic noSuchMethod(Invocation invocation) =>
+      throw UnimplementedError('_PlanRepo: ${invocation.memberName}');
 }
 
 void main() {
@@ -73,5 +107,31 @@ void main() {
     state.clearError();
     expect(state.error, isNull);
     expect(state.errorLog, isEmpty);
+  });
+
+  test('planFromChat creates the Plan chat, then sends one plan turn naming the source',
+      () async {
+    final state = AppState(config);
+    final repo = _PlanRepo();
+    state.repo = repo;
+    final lumen = Project.fromJson({
+      'id': 'lumen',
+      'name': 'lumen',
+      'repo': 'Flexingg/lumen',
+      'profile': 'dev-lumen',
+    });
+    final source = ChatSession(
+        id: '20260926_181654_5c4f08', title: 'Liftosaurus-Rex', lastPreview: 'Rex',
+        lastTimestamp: DateTime(2026, 9, 26), profileId: 'dev-lumen');
+
+    final sid = await state.planFromChat(lumen, source);
+
+    expect(sid, 'plan-new');
+    expect(repo.calls, ['createSession:Plan · lumen:dev-lumen', 'send:plan-new']);
+    final send = repo.sends.single;
+    expect((send['mode'], send['project'], send['profile']), ('plan', 'lumen', 'dev-lumen'));
+    expect(send['text'], allOf(contains('20260926_181654_5c4f08'), contains("'Liftosaurus-Rex'")));
+    expect(state.messagesFor(source.id), isEmpty);
+    expect(state.activeSessionId, isNot(source.id));
   });
 }

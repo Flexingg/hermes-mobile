@@ -536,12 +536,14 @@ class AppState extends ChangeNotifier {
   }
 
   /// [mode]/[project]/[profile] are set in a project chat ('plan' = Plan mode).
+  /// [sessionId] sends to that chat instead of the active one.
   Future<void> sendMessage(String text,
       {List<Attachment> attachments = const [],
       String? mode,
       String? project,
-      String? profile}) async {
-    final sid = activeSessionId;
+      String? profile,
+      String? sessionId}) async {
+    final sid = sessionId ?? activeSessionId;
     if (sid == null || sending) return;
     sending = true;
     notifyListeners();
@@ -809,6 +811,24 @@ class AppState extends ChangeNotifier {
       reportError(e, context: 'new project chat');
       return null;
     }
+  }
+
+  /// Turn an existing chat into a Plan. Creates the project agent's Plan chat, sends
+  /// one plan-mode turn that names the source chat, and returns the new session id.
+  /// The source chat is only read by the agent — never written to.
+  Future<String?> planFromChat(Project p, ChatSession source) async {
+    final sid = await createProjectChat(p, 'Plan · ${p.name}');
+    if (sid == null) return null;
+    await sendMessage(
+      "Turn the chat '${source.title}' (session ${source.id}) into a plan. "
+      'Read it with session_search, then shape one issue for ${p.repo}. '
+      "Ask if the scope isn't clear.",
+      mode: 'plan',
+      project: p.id,
+      profile: p.profile,
+      sessionId: sid,
+    );
+    return sid;
   }
 
   /// Ask Hermes to act, tracking [key] as pending while it works. Returns its
