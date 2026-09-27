@@ -22,15 +22,15 @@ class ProjectPage extends StatefulWidget {
 }
 
 class _ProjectPageState extends State<ProjectPage> {
+  static const _normal = Duration(seconds: 10);
+  String get _key => 'project:${widget.projectId}';
   Timer? _poll;
 
   @override
   void initState() {
     super.initState();
     WidgetsBinding.instance.addPostFrameCallback((_) => _refresh());
-    _poll = Timer.periodic(const Duration(seconds: 10), (_) {
-      if (mounted) context.read<AppState>().loadProject(widget.projectId);
-    });
+    _schedule(_normal);
   }
 
   @override
@@ -39,9 +39,25 @@ class _ProjectPageState extends State<ProjectPage> {
     super.dispose();
   }
 
+  void _schedule(Duration d) {
+    _poll?.cancel();
+    _poll = Timer(d, _tick);
+  }
+
+  Future<void> _tick() async {
+    if (!mounted) return;
+    final state = context.read<AppState>();
+    await state.pollTick(_key, () => state.loadProject(widget.projectId), normal: _normal);
+    if (mounted) _schedule(state.pollInterval(_key, _normal));
+  }
+
+  /// Pull-to-refresh resets the poll's cadence. Only the polled load runs in
+  /// the tick: a route the bridge lacks (an older build without notes) must
+  /// not stop the project poll that still works.
   Future<void> _refresh() async {
     final state = context.read<AppState>();
-    await state.loadProject(widget.projectId);
+    await state.pollTick(_key, () => state.loadProject(widget.projectId),
+        normal: _normal, userInitiated: true);
     final p = state.projectById(widget.projectId);
     await Future.wait([
       state.loadProjectSessions(widget.projectId),

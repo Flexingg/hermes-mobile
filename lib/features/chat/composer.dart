@@ -248,6 +248,21 @@ class _MessageComposerState extends State<MessageComposer> {
   /// cuts the run off wherever it is.
   Widget _stopButton(BuildContext context, AppState state) {
     final scheme = Theme.of(context).colorScheme;
+    if (state.stopUnavailable) {
+      // The bridge answered 404: it is an older build with no Stop route.
+      // Going back to the inviting first shape just asked for the same 404
+      // again, so it stays disabled — in the error tone — for this turn.
+      return IconButton.filledTonal(
+        key: const Key('stop-failed'),
+        style: IconButton.styleFrom(
+          disabledBackgroundColor: scheme.errorContainer,
+          disabledForegroundColor: scheme.onErrorContainer,
+        ),
+        icon: const Icon(Icons.block),
+        tooltip: 'the bridge does not have the Stop route (older build)',
+        onPressed: null,
+      );
+    }
     if (state.stoppingHard) {
       // The kill is on its way; nothing left to press.
       return IconButton.filledTonal(

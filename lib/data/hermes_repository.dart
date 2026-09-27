@@ -31,7 +31,11 @@ class HermesRepository implements AppRepository {
   /// the edge rejects the request before the bridge ever sees the bearer.
   final String? accessClientId;
   final String? accessClientSecret;
-  final http.Client _client;
+  http.Client _client;
+
+  /// Only a client this repository made is ours to close and replace; an
+  /// injected one (tests) belongs to the caller.
+  final bool _ownsClient;
 
   HermesRepository({
     required this.baseUrl,
@@ -39,7 +43,8 @@ class HermesRepository implements AppRepository {
     this.accessClientId,
     this.accessClientSecret,
     http.Client? client,
-  }) : _client = client ?? http.Client();
+  })  : _client = client ?? http.Client(),
+        _ownsClient = client == null;
 
   /// Extra headers a Cloudflare Access policy expects on every request,
   /// including the WebSocket handshake.
@@ -69,18 +74,41 @@ class HermesRepository implements AppRepository {
   ApiFailure _offline(String method, String path, Object error) =>
       ApiFailure(method, path, 0, 'could not reach $baseUrl: $error');
 
+  /// Throw away the pooled connection. After the phone changes network (or the
+  /// bridge restarts) the pool can hand back a socket that is already dead: the
+  /// request never leaves the phone and only the 15 s timeout ends it.
+  ///
+  /// The old client is abandoned rather than closed: `IOClient.close()` forces
+  /// every request still on it shut, and that would cut off a healthy long call
+  /// (a 3-minute `chat/start`, an intent, a download) sharing the pool. Its idle
+  /// sockets close on their own idle timeout.
+  void _dropClient() {
+    if (!_ownsClient) return;
+    _client = http.Client();
+  }
+
+  /// A GET that failed in transport gets one more try on a fresh connection —
+  /// it is idempotent, so a retry can't do anything twice. A non-2xx is an
+  /// answer, not a dead socket, and is never retried.
   Future<dynamic> _get(String path) async {
     http.Response res;
     try {
-      res = await _client
-          .get(Uri.parse('$baseUrl$path'), headers: _headers)
-          .timeout(const Duration(seconds: 15));
-    } catch (e) {
-      throw _offline('GET', path, e);
+      res = await _getOnce(path);
+    } catch (_) {
+      _dropClient();
+      try {
+        res = await _getOnce(path);
+      } catch (e) {
+        throw _offline('GET', path, e);
+      }
     }
     if (res.statusCode >= 400) throw _failure('GET', path, res);
     return jsonDecode(res.body);
   }
+
+  Future<http.Response> _getOnce(String path) => _client
+      .get(Uri.parse('$baseUrl$path'), headers: _headers)
+      .timeout(const Duration(seconds: 15));
 
   Future<dynamic> _post(String path, [Map<String, dynamic>? body]) async {
     http.Response res;

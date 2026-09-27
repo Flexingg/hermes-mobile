@@ -39,9 +39,17 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
     // this app never hears about; without a reload on return the chat list
     // would not show the conversation the user just had. Skipped while
     // disconnected, where a reload could only put up an error banner.
-    if (lifecycle != AppLifecycleState.resumed) return;
     final state = context.read<AppState>();
-    if (state.connected) state.refreshSessions();
+    // Recorded on every change, so no page polls while the app is backgrounded.
+    state.lifecycle = lifecycle;
+    if (lifecycle != AppLifecycleState.resumed) return;
+    if (state.connected) {
+      state.refreshSessions();
+    } else if (state.offline) {
+      // Polls are off while offline, so nothing else would notice the bridge
+      // coming back (the strip may have been dismissed): one check per return.
+      state.retry();
+    }
   }
 
   /// Work waiting on the user: PRs ready to test plus tasks that need them.
@@ -62,7 +70,17 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
         children: [
           // Failures used to disappear into `catch (_) {}`; a visible strip is
           // the difference between "the bridge is down" and "nothing happened".
-          if (state.error != null)
+          // An unreachable bridge is one standing strip with a Retry, not a
+          // banner per failed poll; at most one strip shows at a time.
+          if (state.offline && !state.offlineDismissed)
+            ErrorBanner(
+              offline: true,
+              message: state.offlineMessage!,
+              log: state.errorLog,
+              onRetry: state.retry,
+              onDismiss: state.dismissOffline,
+            )
+          else if (state.error != null)
             ErrorBanner(
               message: state.error!,
               log: state.errorLog,

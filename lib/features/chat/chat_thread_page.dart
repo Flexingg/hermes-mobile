@@ -86,13 +86,31 @@ class _ChatThreadPageState extends State<ChatThreadPage> {
   /// WebSocket is one-shot (it closes after a reply's `done`), so there's no
   /// persistent push channel to a parked thread — a light poll is how a reply
   /// that arrives while you're sitting here shows up without reopening.
-  void _startPolling() {
+  ///
+  /// The state decides whether a tick runs and how long until the next one, so
+  /// an unreachable bridge is polled slower, once at a time, not every 5 s.
+  static const _normal = Duration(seconds: 5);
+  String get _key => 'thread:${widget.sessionId}';
+
+  void _startPolling() => _schedule(_normal);
+
+  void _schedule(Duration d) {
     _poll?.cancel();
-    _poll = Timer.periodic(const Duration(seconds: 5), (_) {
-      if (!mounted) return;
-      final state = context.read<AppState>();
-      state.refreshThread(_effectiveId(state));
-    });
+    _poll = Timer(d, _tick);
+  }
+
+  Future<void> _tick() async {
+    if (!mounted) return;
+    final state = context.read<AppState>();
+    await state.pollTick(_key, () => state.refreshThread(_effectiveId(state)),
+        normal: _normal);
+    if (mounted) _schedule(state.pollInterval(_key, _normal));
+  }
+
+  Future<void> _refresh() async {
+    final state = context.read<AppState>();
+    await state.pollTick(_key, () => state.refreshThread(_effectiveId(state)),
+        normal: _normal, userInitiated: true);
   }
 
   @override
@@ -173,8 +191,7 @@ class _ChatThreadPageState extends State<ChatThreadPage> {
             child: messages.isEmpty
                 ? _empty(context)
                 : RefreshIndicator(
-                    onRefresh: () async =>
-                        context.read<AppState>().refreshThread(_effectiveId(state)),
+                    onRefresh: _refresh,
                     child: ListView.builder(
                     controller: _scroll,
                     padding: const EdgeInsets.fromLTRB(12, 8, 12, 8),
@@ -301,7 +318,9 @@ class _ChatThreadPageState extends State<ChatThreadPage> {
     final toolActive = last != null && last.role == ChatMessageRole.tool;
     // Stop is two-stage, so say which stage it is in: "after this step" is a
     // promise about the reply's shape, and the user should be able to see it.
-    final label = state.stoppingHard
+    final label = state.stopUnavailable
+        ? "Can't stop this turn — the bridge is an older build without Stop"
+        : state.stoppingHard
         ? 'Stopping now…'
         : state.stopRequested
             ? 'Stopping after this step…'
@@ -317,9 +336,15 @@ class _ChatThreadPageState extends State<ChatThreadPage> {
               height: 14,
               child: CircularProgressIndicator(strokeWidth: 2)),
           const SizedBox(width: 10),
-          Text(label,
-              style: TextStyle(
-                  fontSize: 12, color: scheme.onSurfaceVariant)),
+          Flexible(
+            child: Text(label,
+                overflow: TextOverflow.ellipsis,
+                style: TextStyle(
+                    fontSize: 12,
+                    color: state.stopUnavailable
+                        ? scheme.error
+                        : scheme.onSurfaceVariant)),
+          ),
         ],
       ),
     );

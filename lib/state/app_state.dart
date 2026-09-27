@@ -4,10 +4,12 @@ import 'package:flutter/foundation.dart';
 import '../core/config/app_config.dart';
 import '../core/notifications/notifications.dart';
 import '../core/notifications/push.dart';
+import '../data/api_failure.dart';
 import '../data/app_repository.dart';
 import '../data/hermes_repository.dart';
 import '../data/models.dart';
 import '../data/project_models.dart';
+import 'poll_schedule.dart';
 
 /// Central reactive store driving the UI. Pages watch this notifier and call
 /// its methods; it owns the repository instance and streaming subscriptions.
@@ -31,10 +33,13 @@ class AppState extends ChangeNotifier {
   ///
   /// It lives here (not in the composer) so the button keeps its shape across
   /// rebuilds, and so the sending bar can say what is actually happening.
+  /// 3 = this bridge has no Stop route (an older build): the button stays
+  /// disabled for this turn instead of inviting the same 404 again.
   int stopStage = 0;
 
-  bool get stopRequested => stopStage > 0;
+  bool get stopRequested => stopStage == 1 || stopStage == 2;
   bool get stoppingHard => stopStage == 2;
+  bool get stopUnavailable => stopStage == 3;
 
   // Optimistic new-chat flow: a thread opens under a temp id, then swaps to
   // the real session once the bridge creates it.
@@ -118,23 +123,218 @@ class AppState extends ChangeNotifier {
   final List<String> _errorLog = [];
   List<String> get errorLog => List.unmodifiable(_errorLog);
 
+  // Consecutive identical failures collapse into one row: the log records a
+  // condition ("the bridge is down since 09:14, ×40"), not every attempt.
+  String? _lastLoggedMessage;
+  int _repeatCount = 0;
+  DateTime? _firstLoggedAt;
+
+  // What the user last closed. A background poll repeating the same failure
+  // must not put the banner straight back.
+  String? _dismissedError;
+
   /// Surface a failure instead of swallowing it. Sets [error] (the banner) and
   /// appends to the bounded log.
-  void reportError(Object e, {String? context}) {
+  ///
+  /// A failure raised inside [pollTick] is a background failure whatever
+  /// [background] says: it slows that poll down, and it never re-fires the
+  /// banner — an unreachable bridge becomes the [offline] strip instead.
+  void reportError(Object e, {String? context, bool background = false}) {
+    final tick = Zone.current[_pollZoneKey] as String?;
+    if (tick != null) _tickFailures[tick] = (_tickFailures[tick] ?? 0) + 1;
+    if (e is ApiFailure && e.isMissingRoute) {
+      _reportMissingRoute(e, context: context, tick: tick);
+      return;
+    }
     final msg = context == null ? e.toString() : '$context: $e';
-    error = msg;
-    _errorLog.insert(0, '${DateTime.now().toIso8601String()}  $msg');
+    if (tick == null && !background) {
+      error = msg;
+      _log(msg);
+      notifyListeners();
+      return;
+    }
+    if (e is ApiFailure && e.isOffline) {
+      _noteOffline();
+      return;
+    }
+    _log(msg);
+    if (msg != error && msg != _dismissedError) error = msg;
+    notifyListeners();
+  }
+
+  void _log(String msg) {
+    final now = DateTime.now();
+    if (msg == _lastLoggedMessage && _errorLog.isNotEmpty) {
+      _repeatCount++;
+      _errorLog[0] = '${_firstLoggedAt!.toIso8601String()}  $msg'
+          '  (×$_repeatCount, last ${now.toIso8601String()})';
+      return;
+    }
+    _lastLoggedMessage = msg;
+    _repeatCount = 1;
+    _firstLoggedAt = now;
+    _errorLog.insert(0, '${now.toIso8601String()}  $msg');
     if (_errorLog.length > maxErrorLog) {
       _errorLog.removeRange(maxErrorLog, _errorLog.length);
     }
-    notifyListeners();
   }
 
   void clearError() {
     if (error == null && _errorLog.isEmpty) return;
+    _dismissedError = error;
     error = null;
     _errorLog.clear();
+    _lastLoggedMessage = null;
+    _repeatCount = 0;
+    _firstLoggedAt = null;
     notifyListeners();
+  }
+
+  // ---- offline: a state, not a banner ---------------------------------
+  /// The bridge can't be reached right now. Shown as one persistent strip with
+  /// a Retry, instead of a fresh banner for every poll that times out.
+  bool offline = false;
+
+  /// The user closed the strip; don't re-show it for this same condition.
+  bool offlineDismissed = false;
+
+  /// "Can't reach the bridge at 192.168.1.146:9130".
+  String? offlineMessage;
+
+  void dismissOffline() {
+    if (offlineDismissed) return;
+    offlineDismissed = true;
+    notifyListeners();
+  }
+
+  /// `host:port` of the configured bridge — the part the user can act on.
+  String get _bridgeAddress {
+    final raw = config.serverBaseUrl ?? '';
+    final uri = Uri.tryParse(raw);
+    if (uri != null && uri.host.isNotEmpty) {
+      return uri.hasPort ? '${uri.host}:${uri.port}' : uri.host;
+    }
+    return raw.isEmpty ? 'the configured address' : raw;
+  }
+
+  void _noteOffline() {
+    final text = "Can't reach the bridge at $_bridgeAddress";
+    _log(text);
+    connected = false;
+    // Already showing this condition: count it, but don't re-fire the strip
+    // or undo the user's dismiss.
+    if (offline && offlineMessage == text) return;
+    offline = true;
+    offlineMessage = text;
+    offlineDismissed = false;
+    notifyListeners();
+  }
+
+  void _clearOffline() {
+    offline = false;
+    offlineDismissed = false;
+    offlineMessage = null;
+    connected = true;
+  }
+
+  /// User-initiated Retry: forget the backoff and the dead routes' stop, and
+  /// re-verify the bridge with a live status response.
+  Future<void> retry() async {
+    error = null;
+    offline = false;
+    offlineMessage = null;
+    offlineDismissed = false;
+    for (final slot in _polls.values) {
+      slot.stopped = false;
+      slot.schedule.reset();
+    }
+    notifyListeners();
+    await _connect();
+    if (!connected) {
+      // Still down: say so once, in the strip — Retry must never be the thing
+      // that starts a banner storm.
+      _noteOffline();
+      error = null;
+      notifyListeners();
+    }
+  }
+
+  // ---- routes this bridge build does not have --------------------------
+  // 'GET /api/v1/projects/x/notes' — each is reported once, ever.
+  final Set<String> _deadRoutes = {};
+
+  /// A 404/405/501 is an answer, not an outage: the bridge is an older build
+  /// than the app. Say that once per route, and stop polling it.
+  void _reportMissingRoute(ApiFailure f, {String? context, String? tick}) {
+    if (tick != null) _polls[tick]?.stopped = true;
+    final key = '${f.method} ${f.path}';
+    if (!_deadRoutes.add(key)) return;
+    final text = 'bridge is running an older build — restart hermes-bridge '
+        '($key → ${f.status})';
+    final msg = context == null ? text : '$context: $text';
+    error = msg;
+    _log(msg);
+    notifyListeners();
+  }
+
+  // ---- background polls: one in flight, backed off, gated ---------------
+  static final Object _pollZoneKey = Object();
+  final Map<String, PollSlot> _polls = {};
+  final Map<String, int> _tickFailures = {};
+
+  /// Set by the shell's lifecycle observer; nothing polls in the background.
+  AppLifecycleState lifecycle = AppLifecycleState.resumed;
+
+  bool get canPoll => lifecycle == AppLifecycleState.resumed && connected;
+
+  PollSlot pollSlot(String key, Duration normal) =>
+      _polls.putIfAbsent(key, () => PollSlot(normal));
+
+  /// What the page reschedules its timer with.
+  Duration pollInterval(String key, Duration normal) => pollSlot(key, normal).interval;
+  int pollRuns(String key) => _polls[key]?.runs ?? 0;
+  int pollSkips(String key) => _polls[key]?.skips ?? 0;
+  bool pollStopped(String key) => _polls[key]?.stopped ?? false;
+
+  /// One tick for [key]. Skipped while the previous call is in flight, while
+  /// the app is backgrounded, or while disconnected — unless [userInitiated].
+  ///
+  /// The loaders catch and report their own failures, so the tick learns how
+  /// it went from [reportError]: the job runs in a zone tagged with [key], and
+  /// every failure reported from inside it counts against this slot. A zone
+  /// (not a field) so two pages' ticks in flight at once can't swap results.
+  Future<void> pollTick(String key, Future<void> Function() job,
+      {required Duration normal, bool userInitiated = false}) async {
+    final slot = pollSlot(key, normal);
+    if (slot.stopped && !userInitiated) return;
+    if (slot.inFlight) {
+      slot.skips++;
+      return;
+    }
+    if (!canPoll && !userInitiated) return;
+    if (userInitiated) slot.schedule.reset();
+    slot.inFlight = true;
+    slot.runs++;
+    _tickFailures[key] = 0;
+    try {
+      await runZoned(() async {
+        try {
+          await job();
+        } catch (e) {
+          reportError(e, context: key);
+        }
+      }, zoneValues: {_pollZoneKey: key});
+    } finally {
+      slot.inFlight = false;
+      if ((_tickFailures.remove(key) ?? 0) > 0) {
+        slot.schedule.onFailure();
+      } else {
+        slot.schedule.onSuccess();
+        // A poll that got an answer means the bridge is back.
+        if (offline) _clearOffline();
+      }
+      notifyListeners();
+    }
   }
 
   /// Run a UI-triggered action and surface its failure.
@@ -264,6 +464,11 @@ class AppState extends ChangeNotifier {
   Future<void> disconnect() async {
     await config.clearServer();
     connected = false;
+    offline = false;
+    offlineDismissed = false;
+    offlineMessage = null;
+    _polls.clear();
+    _deadRoutes.clear();
     _sub?.cancel();
     sessions = [];
     _messages.clear();
@@ -635,7 +840,7 @@ class AppState extends ChangeNotifier {
   /// confirmed) cuts it off wherever it is.
   Future<void> stopTurn({bool hard = false}) async {
     final sid = activeSessionId;
-    if (sid == null || !sending) return;
+    if (sid == null || !sending || stopUnavailable) return;
     stopStage = hard ? 2 : 1;
     notifyListeners();
     try {
@@ -647,7 +852,13 @@ class AppState extends ChangeNotifier {
         error = 'Stop did not land — that turn had already finished.';
       }
     } catch (e) {
-      stopStage = 0;
+      if (e is ApiFailure && e.isMissingRoute) {
+        // Snapping back to the first shape invited the same 404 again (43 of
+        // them in three minutes). Hold it disabled and say why, once.
+        stopStage = 3;
+      } else {
+        stopStage = 0;
+      }
       reportError(e, context: 'stop');
     }
     notifyListeners();
@@ -1002,4 +1213,24 @@ class AppState extends ChangeNotifier {
     _sub?.cancel();
     super.dispose();
   }
+}
+
+/// One background poll's bookkeeping: its cadence, and whether it may run.
+class PollSlot {
+  final Duration normal;
+  final PollSchedule schedule;
+
+  /// One request at a time: a tick that finds this set is skipped, not queued.
+  bool inFlight = false;
+
+  /// A route this poll needs is missing on the bridge: never poll it again
+  /// (until the user retries).
+  bool stopped = false;
+
+  int runs = 0;
+  int skips = 0;
+
+  PollSlot(this.normal) : schedule = PollSchedule(normal);
+
+  Duration get interval => schedule.interval;
 }

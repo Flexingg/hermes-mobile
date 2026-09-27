@@ -47,6 +47,43 @@ void main() {
         expect(e.detail, contains('could not reach'));
       }
     });
+
+    test('a GET on a dead pooled socket is retried once and then answers', () async {
+      var calls = 0;
+      final repo = repoFor(MockClient((_) async {
+        calls++;
+        if (calls == 1) throw const SocketException('Connection reset by peer');
+        return http.Response('[]', 200);
+      }));
+      expect(await repo.sessions(), isEmpty);
+      expect(calls, 2);
+    });
+
+    test('a 404 is an answer, not a dead socket: it is not retried', () async {
+      var calls = 0;
+      final repo = repoFor(MockClient((_) async {
+        calls++;
+        return http.Response('{"detail":"Not Found"}', 404);
+      }));
+      try {
+        await repo.cronJobs();
+        fail('expected ApiFailure');
+      } on ApiFailure catch (e) {
+        expect(e.isMissingRoute, isTrue);
+      }
+      expect(calls, 1);
+    });
+
+    test('a POST is never retried — it may already have been applied', () async {
+      var calls = 0;
+      final repo = repoFor(MockClient((_) async {
+        calls++;
+        throw const SocketException('refused');
+      }));
+      await expectLater(repo.runCronJob('abc123456789'),
+          throwsA(isA<ApiFailure>().having((e) => e.isOffline, 'isOffline', isTrue)));
+      expect(calls, 1);
+    });
   });
 
   group('previewUrl', () {
