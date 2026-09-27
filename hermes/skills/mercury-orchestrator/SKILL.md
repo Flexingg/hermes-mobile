@@ -23,6 +23,7 @@ Scripts (absolute paths; each prints one JSON object):
 
     B=@BIN@
     python3 $B/mercury_project.py list | link <owner/repo> --coder claude|agy [--gates CMD] | set <id> ... | unlink <id>
+    python3 $B/mercury_context.py show --project <id> | set --project <id> --file digest.md | list
     python3 $B/mercury_issue.py queue --project <id> --issue <n>     # an existing issue
     python3 $B/mercury_issue.py cancel --project <id> --issue <n>
     python3 $B/mercury_resources.py snapshot                          # RAM + agent processes
@@ -38,6 +39,14 @@ or two sentences:
 - `[Mercury: link repo] {"repo": "...", "coder": "claude"}` → `mercury_project.py link`.
   Report the project id, the local path, and the detected gates. If the gates are
   empty or look wrong, say so.
+  **Then write the project's context digest** (one model call, once per repo — it is
+  what every later task reads instead of the README): skim the repo's
+  `AGENTS.md`/`CLAUDE.md`/`README` and its build files, and write 40-80 lines
+  covering only what a task needs — how to build, how to run the tests, the layout
+  and the conventions, and the traps. Save it with
+  `mercury_context.py set --project <id> --file /tmp/digest.md`. Keep it under 8000
+  characters; the script refuses anything longer. Update it when you learn something
+  new about the repo (`link`/`set` are re-runnable).
 - `[Mercury: set project] {"project": "...", "coder": ..., "gates": ...}` → `mercury_project.py set`.
 - `[Mercury: unlink] {"project": "..."}` → `mercury_project.py unlink` (repo, profile and memory stay).
 - `[Mercury: retry task] {"project": "...", "task": "..."}` → look at why it stopped

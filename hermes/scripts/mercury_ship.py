@@ -23,6 +23,7 @@ from pathlib import Path
 from mercury_common import (HERMES_ROOT, MercuryError, emit, get_project, gh, hermes, main_guard,
                             run, task_state, update_task_state)
 from mercury_code import NEVER_COMMIT, changed_files, git
+from mercury_context import read_digest
 
 HOOKS_DIR = HERMES_ROOT / "mercury" / "hooks"
 APKS = HERMES_ROOT / "mercury" / "apks"
@@ -75,10 +76,15 @@ def cmd_prepare(a) -> int:
     carried = carry_local_config(project, worktree)
     state = update_task_state(a.task, project=project["id"], worktree=str(worktree), branch=branch,
                               phase="working", preparedAt=time.time())
+    digest = read_digest(project["id"])
     return emit({"ok": True, "branch": branch, "guard": "pre-push installed for this worktree only",
                  "localConfig": carried,
                  "issue": state.get("issue"), "coder": project.get("coder", "claude"),
-                 "gates": project.get("gates", "")})
+                 "gates": project.get("gates", ""),
+                 # Whether the short per-project brief exists. The worker reads it
+                 # instead of the README; missing is the cue to read the repo's own
+                 # docs once and propose a digest.
+                 "contextDigest": len(digest) or None})
 
 
 def keep_local_apk(project: dict, worktree: Path, state: dict, pr_number: int, head: str) -> str | None:

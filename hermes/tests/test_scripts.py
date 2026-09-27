@@ -834,3 +834,87 @@ def test_tunnel_down_is_a_no_op_with_nothing_running(env):
     assert rc == 0 and out["stopped"] is False
     rc, out = env.run("mercury_tunnel.py", "status")
     assert out["up"] is False
+
+
+# -- token budgets: what a failed gate, and a task's context, actually cost -------
+def test_a_failed_gate_hands_back_the_failure_not_the_whole_log(env, repo, coder):
+    """Two coder rounds used to mean paying for the same 40-line log twice, and a
+    "line" can be a 20 KB stack trace. The brief gets a bounded signal plus the
+    path to the full log."""
+    env.project(gates='i=0; while [ $i -lt 30 ]; do echo "progress line $i $(printf "x%.0s" $(seq 1 400))"; '
+                       'i=$((i+1)); done; echo "Traceback (most recent call last):"; '
+                       'echo "E   AssertionError: the card did not round"; exit 1')
+    rc, out = env.run("mercury_code.py", "run", "--project", "demo", "--worktree", str(repo["wt"]),
+                      "--brief", str(coder))
+    assert rc == 1
+    g = out["gates"]
+    assert g["rc"] == 1 and g["passed"] is False
+    assert g["outputBytes"] > 10000 and g["truncated"] is True
+    assert len(g["tail"]) <= 3000 and "truncated" in g["tail"]
+    # The signal, not the noise: the failure block, and nothing from the 400 lines.
+    assert "AssertionError: the card did not round" in g["failure"]
+    assert "progress line 1 " not in g["failure"]
+    assert len(g["failure"]) <= 1200
+    # The detail is still reachable — behind a path, not in the context.
+    log = Path(g["log"])
+    assert log.is_file() and "progress line 1 " in log.read_text()
+    assert log.name == f"{repo['wt'].name}.log"
+
+
+def test_gate_output_is_saved_even_when_the_gates_pass(env, repo, coder):
+    env.project(gates="echo all good")
+    rc, out = env.run("mercury_code.py", "run", "--project", "demo", "--worktree", str(repo["wt"]),
+                      "--brief", str(coder))
+    assert rc == 0
+    g = out["gates"]
+    assert g["passed"] is True and g["truncated"] is False and g["failure"] == ""
+    assert "all good" in Path(g["log"]).read_text()
+
+
+def test_an_unconfigured_gate_says_so_without_a_log(env, repo, coder):
+    env.project(gates="")
+    rc, out = env.run("mercury_code.py", "gates", "--project", "demo", "--worktree", str(repo["wt"]))
+    assert out["gates"]["passed"] is None and out["gates"]["log"] is None
+
+
+# -- the per-project context digest ------------------------------------------------
+def test_the_context_digest_is_stored_bounded_and_printed_verbatim(env):
+    env.project()
+    digest = env.tmp / "digest.md"
+    digest.write_text("## Build\n./gradlew test\n\n## Traps\nuse --no-daemon\n")
+    rc, out = env.run("mercury_context.py", "set", "--project", "demo", "--file", str(digest))
+    assert rc == 0 and out["chars"] > 0
+
+    rc, shown = env.run("mercury_context.py", "show", "--project", "demo")
+    assert rc == 0
+    # Plain text, not a JSON envelope: this output exists to sit in a prompt.
+    assert isinstance(shown, str) and "use --no-daemon" in shown and "digest" not in shown[0:20]
+    assert len(shown) < 500
+
+
+def test_a_missing_digest_is_a_clear_error_not_an_empty_answer(env):
+    env.project()
+    rc, out = env.run("mercury_context.py", "show", "--project", "demo")
+    assert rc == 1 and "no context digest" in out["error"]
+    assert "mercury_context.py set" in out["error"]
+
+
+def test_a_digest_that_stopped_being_short_is_refused(env):
+    env.project()
+    rc, out = env.run("mercury_context.py", "set", "--project", "demo", "--text", "x" * 8001)
+    assert rc == 1 and "the limit is 8000" in out["error"]
+    rc, out = env.run("mercury_context.py", "set", "--project", "demo", "--text", "  ")
+    assert rc == 1 and "empty" in out["error"]
+    rc, out = env.run("mercury_context.py", "set", "--project", "demo")
+    assert rc == 1 and "exactly one of" in out["error"]
+
+
+def test_prepare_says_whether_a_digest_exists(env, repo, shipped):
+    rc, out = env.run("mercury_ship.py", "prepare", "--project", "demo", "--task", "t_abc",
+                      "--worktree", str(repo["wt"]))
+    assert rc == 0 and out["contextDigest"] is None
+    rc, out = env.run("mercury_context.py", "set", "--project", "demo", "--text", "build: true")
+    assert rc == 0
+    rc, out = env.run("mercury_ship.py", "prepare", "--project", "demo", "--task", "t_abc",
+                      "--worktree", str(repo["wt"]))
+    assert out["contextDigest"] == len("build: true")
