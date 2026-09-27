@@ -973,10 +973,13 @@ def send_message(session_id: str, body: dict):
     except ValueError:
         raise HTTPException(status_code=400, detail="invalid profile")
     system = None
-    if (body.get("mode") or "chat") == "plan":
+    mode = (body.get("mode") or "chat").lower()
+    if mode == "plan":
         project = _project_for(body.get("project"), profile)
         text = f"[Mercury Plan · project {project['id']} · {project['repo']}]\n{text}"
         system = _PLAN_SYSTEM.format(**project)
+    else:
+        system = _chat_system(body.get("project"), profile)
     _spawn_hermes(session_id, text, attachments, profile=profile, system=system)
     return {"ok": True, "pending": True}
 
@@ -3118,6 +3121,33 @@ _PLAN_SYSTEM = (
     "with one ```issue-draft JSON block."
 )
 
+# Chat mode is for thinking together, not for changing the repo. This exists
+# because it did not: an agent in a project chat will happily do the whole job
+# itself — write the code, run the gates, commit — which skips the flow the whole
+# design rests on (Plan → issue → worker → PR, §2/§6.2). The per-turn system
+# message is the only lever available: the API server exposes no per-request
+# toolset override (§16), so this is the same shape as Plan mode's read-only rule.
+# Byte-stable per project on purpose, so it does not break prompt caching.
+_CHAT_SYSTEM = (
+    "Mercury Chat mode for project {id} ({repo}). Chat is for thinking together, not for "
+    "changing the repo. Read and search as much as you like, but do NOT edit or create files, "
+    "commit, push, open a PR or file anything — however finished and obvious the request "
+    "sounds, and even if the user describes exactly what to change. When they want a change, "
+    "help them scope it and point them at Plan mode, which turns it into an issue that a "
+    "worker ships as a PR. The single exception is an explicit instruction to make the change "
+    "in this chat (\"edit it here\", \"just do it now\"): then say what you are going to change "
+    "and how you will verify it, before you touch anything."
+)
+
+# Every other app chat (the orchestrator's included). Shorter, because the
+# orchestrator is a general assistant: the rule is about the linked projects.
+_CHAT_GENERAL_NOTE = (
+    "This chat is in Mercury, which drives linked GitHub projects. Code changes to a linked "
+    "project go through the flow — Plan mode or an issue, then a worker, then a PR — never "
+    "straight from this chat. Do not edit a project's files here unless the user explicitly "
+    "asks for that change in this chat, and then say what you will change before you start."
+)
+
 # kanban status -> the phase the app shows, before Mercury's own task state refines it
 _PHASE_FROM_STATUS = {"triage": "queued", "todo": "queued", "ready": "queued", "scheduled": "queued",
                       "running": "working", "review": "review", "blocked": "needs_you",
@@ -3147,6 +3177,23 @@ def _project_for(pid: str | None, profile: str | None) -> dict:
         if p.get("profile") == profile:
             return p
     raise HTTPException(status_code=400, detail="Plan mode needs a linked project")
+
+
+def _chat_system(pid: str | None, profile: str | None) -> str:
+    """The per-turn instruction for a Chat-mode turn (see _CHAT_SYSTEM).
+
+    A chat with a project's own agent is the one that can do the most damage — it
+    has the repo checked out and every tool — so it gets the specific message.
+    Anything else (the orchestrator, a plain Hermes chat) gets the general note
+    about the linked projects. This is deliberately the same shape as Plan mode's
+    read-only rule because that is the only per-turn lever the gateway has.
+    """
+    if pid:
+        return _CHAT_SYSTEM.format(**_project_or_404(pid))
+    for p in _mercury_projects():
+        if p.get("profile") == profile:
+            return _CHAT_SYSTEM.format(**p)
+    return _CHAT_GENERAL_NOTE
 
 
 def _task_phase(status: str, state: dict) -> str:

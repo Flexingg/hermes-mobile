@@ -315,6 +315,62 @@ def test_plan_mode_turn_carries_the_plan_rules(client, api, monkeypatch):
     assert r.status_code == 400
 
 
+# -- Chat is not a place where code changes happen ---------------------------------
+# The whole design rests on Plan → issue → worker → PR. A chat with a project's
+# agent has the repo checked out and every tool, so without this it just does the
+# job itself and the flow is skipped.
+def _spawn_capture(monkeypatch):
+    spawned = []
+    monkeypatch.setattr(bridge, "_spawn_hermes", lambda sid, text, att, profile=None, system=None:
+                        spawned.append((sid, text, profile, system)))
+    return spawned
+
+
+def test_a_project_chat_turn_is_told_not_to_change_the_repo(client, mercury, monkeypatch):
+    spawned = _spawn_capture(monkeypatch)
+    r = client.post("/api/v1/sessions/c1/messages", headers=auth(),
+                    json={"text": "fix the fasting card rounding", "profile": "dev-lumen-launcher"})
+    assert r.status_code == 200, r.text
+    _sid, _text, _profile, system = spawned[0]
+    assert "Mercury Chat mode for project lumen-launcher" in system
+    assert "do NOT edit or create files" in system
+    assert "Plan mode" in system
+    # The exception the user asked for: an explicit in-chat instruction.
+    assert "explicit instruction to make the change" in system
+    # Byte-stable for the same project: prompt caching survives.
+    again = client.post("/api/v1/sessions/c1/messages", headers=auth(),
+                        json={"text": "and how?", "profile": "dev-lumen-launcher"})
+    assert again.status_code == 200
+    assert spawned[1][3] == system
+
+
+def test_a_plain_chat_is_told_the_flow_is_where_code_changes_go(client, mercury, monkeypatch):
+    """The orchestrator chat is a general assistant, so it gets the shorter note."""
+    spawned = _spawn_capture(monkeypatch)
+    r = client.post("/api/v1/sessions/c2/messages", headers=auth(),
+                    json={"text": "how's lumen doing?"})
+    assert r.status_code == 200, r.text
+    system = spawned[0][3]
+    assert "linked GitHub projects" in system and "never straight from this chat" in system
+    assert "Mercury Chat mode" not in system
+
+
+def test_plan_mode_keeps_its_own_message_and_chat_does_not_leak_into_it(client, mercury, monkeypatch):
+    spawned = _spawn_capture(monkeypatch)
+    client.post("/api/v1/sessions/p1/messages", headers=auth(),
+                json={"text": "plan it", "mode": "plan", "profile": "dev-lumen-launcher"})
+    _sid, text, _profile, system = spawned[0]
+    assert "READ-ONLY" in system and "issue-planner" in system
+    assert "Chat mode" not in system
+
+
+def test_a_named_project_that_is_not_linked_is_refused_for_a_chat_turn(client, mercury, monkeypatch):
+    _spawn_capture(monkeypatch)
+    r = client.post("/api/v1/sessions/c3/messages", headers=auth(),
+                    json={"text": "hi", "project": "nope", "profile": "dev-lumen-launcher"})
+    assert r.status_code == 404
+
+
 def test_intents_need_the_api_server(client, mercury, monkeypatch):
     monkeypatch.setattr(bridge, "HERMES_API", HermesApi(Path("/nonexistent"), key=""))
     r = client.post("/api/v1/hermes/intent", json={"kind": "pause"}, headers=auth())

@@ -19,6 +19,20 @@ agents plan issues with the user; kanban workers ship them as PRs using the
 project's coder (Claude Code or Antigravity). You keep it all moving and tell the
 user what matters. **You don't write project code yourself.**
 
+**And neither does a chat.** Code changes to a project belong to the flow: Plan mode
+(or an issue) → the worker → a PR. That is not just tidiness — the flow is what gives
+the work a worktree, a gate run, a reviewable diff and a PR you can test. So: in a
+project chat or your own, read, diagnose and scope as much as you like, but do not
+edit the repo, commit, push or open a PR yourself, and do not carry a whole feature
+through in one turn however clear the request sounds. If a change is wanted, help
+scope it and point at Plan mode. The one exception is an explicit instruction to make
+the change in the chat ("just do it", "edit it here"): say what you will change and
+how you will verify it first, and keep it to that one change.
+
+(The bridge enforces the same rule on every app chat as a per-turn system message —
+see `_CHAT_SYSTEM` in `server/bridge.py`. This paragraph is for the surfaces the
+bridge does not see: the CLI, the dashboard, and you reading this skill.)
+
 Scripts (absolute paths; each prints one JSON object):
 
     B=@BIN@

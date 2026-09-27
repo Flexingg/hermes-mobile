@@ -235,6 +235,7 @@ subprocess path stays as the fallback transport until the API-server path is pro
 | 10 | Notes vs memory | Notes are the user's and are **never** injected into a prompt; memory stays the agent's. Different tabs, different stores |
 | 11 | Push policy | Per project. `auto` (default, unchanged): the PR opens when the gates pass. `test-first`: commit + build, park, and wait for the user's test |
 | 12 | Context digest | Per project, written once by the orchestrator (<8000 chars), read by every worker instead of the README |
+| 13 | Chat vs the flow | **Chat never changes code.** Changes go Plan → issue → worker → PR. An explicit in-chat instruction is the only exception, and then the agent states what it will change first |
 
 ## 11. Out of scope
 
@@ -423,3 +424,33 @@ the commit it was made from, and never in place of CI on a task in review.
   (try an idea in a worktree before filing an issue). The deterministic-CI idea from
   the same conversation was already true: intake, CI follow-up and the RAM floor are
   `--no-agent` cron jobs (§16).
+
+## 18. Chat is not a second way to change the repo (2026-09-26)
+
+The gap this closes: nothing stopped a chat turn from doing the whole job itself —
+read the issue, write the code, run the gates, commit. It is the easiest thing in the
+world for an agent with the repo checked out and every tool to do exactly that when
+the user describes a change, and it silently skips the entire point of Mercury: the
+worktree, the gate run, the reviewable diff, the PR you can test, and the record that
+an issue existed at all.
+
+Three layers, because no single one covers every surface:
+
+1. **The bridge, per turn, for every app chat** (`server/bridge.py`). A Chat-mode turn
+   against a project profile carries `_CHAT_SYSTEM`: read and search freely, do not
+   edit/commit/push/file — however finished the request sounds — and help scope it into
+   Plan mode instead. Any other app chat (the orchestrator's) carries `_CHAT_GENERAL_NOTE`
+   about linked projects. This is the same shape as Plan mode's read-only rule, because
+   it is the only per-turn lever the gateway exposes (no per-request toolset override,
+   §16). The message is byte-stable per project, so prompt caching survives.
+2. **The profile's `SOUL.md`** (dev-hermes-mobile, which is also the template new project
+   profiles are created from). This governs the surfaces the bridge never sees — the CLI,
+   the dashboard — and it is worded to apply to *chat turns only*, because the kanban
+   workers run as the same profile and editing code IS their job (`ship-issue`).
+3. **This document and the `mercury-orchestrator` skill**, so the rule is where a new
+   agent (or a reviewer) reads it.
+
+The exception is deliberate and is part of the rule: an explicit "just do it here" is
+permission, and the agent then says what it will change and how it will verify it
+before touching anything. What is forbidden is *inferring* that permission from a
+well-specified request.
