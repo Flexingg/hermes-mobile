@@ -803,9 +803,20 @@ def _spawn_group_reply(gid: str, text: str) -> None:
         threading.Thread(target=runner, args=(agent,), daemon=True).start()
 
 
+def _group_prompt(text: str) -> str:
+    """A group turn with the chat rule in front of it.
+
+    The group path runs `hermes chat -q`, which has no system-message flag, so the
+    rule rides in the text — the same way the app's intents carry a `[Mercury: …]`
+    marker. Group chats can include a project's agent, so leaving this path open
+    would have been the one way left to change code from a chat.
+    """
+    return f"[Mercury chat] {_CHAT_GENERAL_NOTE}\n\n{text}"
+
+
 def _run_group_agent(gid: str, agent: str, text: str) -> None:
     _broadcast(gid, {"event": "start", "agent": agent})
-    cmd = [HERMES_BIN, "chat", "-q", text, "-Q"]
+    cmd = [HERMES_BIN, "chat", "-q", _group_prompt(text), "-Q"]
     profile = _profile_for(agent)
     if profile:
         cmd += ["-p", profile]

@@ -371,6 +371,29 @@ def test_a_named_project_that_is_not_linked_is_refused_for_a_chat_turn(client, m
     assert r.status_code == 404
 
 
+def test_a_group_chat_turn_carries_the_rule_too(monkeypatch):
+    """The group path runs `hermes chat -q`, which has no system-message flag, so the
+    rule rides in the text. It was the one remaining way to change code from a chat."""
+    sent = {}
+
+    class FakeProc:
+        stdout = None
+
+        def wait(self):
+            return 0
+
+    monkeypatch.setattr(bridge.subprocess, "Popen",
+                        lambda cmd, **kw: (sent.__setitem__("cmd", cmd), FakeProc())[1])
+    monkeypatch.setattr(bridge, "_broadcast", lambda *a, **k: None)
+    monkeypatch.setattr(bridge, "_append_group_message", lambda *a, **k: None)
+    bridge._run_group_agent("g1", "somebot", "how's lumen doing?")
+    cmd = sent["cmd"]
+    prompt = cmd[cmd.index("-q") + 1]
+    assert prompt.startswith("[Mercury chat] ")
+    assert "never straight from this chat" in prompt
+    assert prompt.endswith("how's lumen doing?")  # the user's words survive intact
+
+
 def test_intents_need_the_api_server(client, mercury, monkeypatch):
     monkeypatch.setattr(bridge, "HERMES_API", HermesApi(Path("/nonexistent"), key=""))
     r = client.post("/api/v1/hermes/intent", json={"kind": "pause"}, headers=auth())

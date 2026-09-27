@@ -440,9 +440,12 @@ Three layers, because no single one covers every surface:
    against a project profile carries `_CHAT_SYSTEM`: read and search freely, do not
    edit/commit/push/file — however finished the request sounds — and help scope it into
    Plan mode instead. Any other app chat (the orchestrator's) carries `_CHAT_GENERAL_NOTE`
-   about linked projects. This is the same shape as Plan mode's read-only rule, because
-   it is the only per-turn lever the gateway exposes (no per-request toolset override,
-   §16). The message is byte-stable per project, so prompt caching survives.
+   about linked projects, and the group-chat path (`hermes chat -q`, which has no
+   system-message flag) carries the same note as a `[Mercury chat]` prefix, because a
+   group can include a project's agent. This is the same shape as Plan mode's read-only
+   rule, because it is the only per-turn lever the gateway exposes (no per-request
+   toolset override, §16). The message is byte-stable per project, so prompt caching
+   survives. (Delivery is the same mechanism Plan mode already uses in production.)
 2. **The profile's `SOUL.md`** (dev-hermes-mobile, which is also the template new project
    profiles are created from). This governs the surfaces the bridge never sees — the CLI,
    the dashboard — and it is worded to apply to *chat turns only*, because the kanban
