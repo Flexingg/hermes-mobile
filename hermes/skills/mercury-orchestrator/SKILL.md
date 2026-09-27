@@ -48,6 +48,18 @@ or two sentences:
   characters; the script refuses anything longer. Update it when you learn something
   new about the repo (`link`/`set` are re-runnable).
 - `[Mercury: set project] {"project": "...", "coder": ..., "gates": ...}` → `mercury_project.py set`.
+- `[Mercury: push task] {"project": "...", "task": "..."}` → the project is set to
+  **test-first** and this task is parked (`phase: awaiting_push`) with its test build:
+  the change is committed but was never pushed. The user has now tested it and wants the
+  PR. Re-run publish from the task's own worktree with `--approved`:
+
+      python3 $B/mercury_ship.py publish --project <id> --task <task> --worktree <state.worktree> \
+        --title "<state.awaitingTitle>" --notes "<state.awaitingNotesFile>" --approved
+
+  The title and the PR body are kept in the task state from the parked run (the body as
+  a file path), so nothing has to be re-written. If the task has no `awaitingTitle`, it
+  was not parked by this path: look at `hermes kanban --board <id> show <task>` and say
+  what you find instead of guessing.
 - `[Mercury: unlink] {"project": "..."}` → `mercury_project.py unlink` (repo, profile and memory stay).
 - `[Mercury: retry task] {"project": "...", "task": "..."}` → look at why it stopped
   (`kanban show`, `runs`, `log`), then `hermes kanban --board <id> unblock <task>`

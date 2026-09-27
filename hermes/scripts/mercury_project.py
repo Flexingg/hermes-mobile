@@ -4,6 +4,7 @@
     mercury_project.py link Flexingg/lumen-launcher --coder claude [--gates CMD] [--path DIR]
     mercury_project.py list
     mercury_project.py set lumen-launcher --coder agy --gates "./gradlew test"
+    mercury_project.py set lumen-launcher --push-policy test-first
     mercury_project.py unlink lumen-launcher
 
 `link` is idempotent: it reuses an existing local clone and `dev-<repo>` profile,
@@ -27,6 +28,11 @@ from mercury_common import (CODERS, HERMES_ROOT, REAL_HOME, REPO_RE, MercuryErro
 TEMPLATE_PROFILE = os.environ.get("MERCURY_TEMPLATE_PROFILE", "dev-hermes-mobile")
 REPOS_DIR = Path(os.environ.get("MERCURY_REPOS_DIR") or REAL_HOME / "repos")
 WORKER_SKILLS = ("issue-planner", "ship-issue")
+# auto       — the PR opens as soon as the gates pass (the original behaviour).
+# test-first — the worker commits and stops one step earlier: it keeps the debug
+#              build, parks the task, and nothing reaches GitHub until the user
+#              has actually installed and tested the APK.
+PUSH_POLICIES = ("auto", "test-first")
 
 
 def detect_gates(path: Path) -> str:
@@ -205,6 +211,8 @@ def cmd_set(a) -> int:
         if a.idle < 1:
             raise MercuryError("idle minutes must be at least 1")
         project["idleSleepMinutes"] = a.idle
+    if a.push_policy is not None:
+        project["pushPolicy"] = a.push_policy
     save_projects([p for p in load_projects() if p["id"] != project["id"]] + [project])
     return emit({"ok": True, "project": project})
 
@@ -231,6 +239,10 @@ def main() -> int:
     s.add_argument("--coder")
     s.add_argument("--gates")
     s.add_argument("--idle", type=int)
+    s.add_argument("--push-policy", choices=PUSH_POLICIES, dest="push_policy",
+                   help="auto: open the PR as soon as the gates pass. "
+                        "test-first: build it, park it, and wait for you to test the APK "
+                        "before anything reaches GitHub")
     s = sub.add_parser("unlink")
     s.add_argument("project")
     a = ap.parse_args()

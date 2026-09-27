@@ -76,6 +76,47 @@ def test_needs_you_outranks_everything(client, mercury, tmp_path):
     assert client.get("/api/v1/projects", headers=auth()).json()[0]["status"] == "needs_you"
 
 
+def test_a_task_parked_before_the_push_shows_its_build_and_its_own_phase(client, mercury, tmp_path):
+    """test-first: the work is committed and built, and nothing is on GitHub yet.
+    The app must be able to offer that build, and must not call the task 'needs you'
+    as if something had gone wrong."""
+    _board(tmp_path, [("t_a", "blocked")])
+    apk = str(mercury / "apks" / "lumen-launcher" / "local-abc1234-local.apk")
+    _state(mercury, "t_a", phase="awaiting_push", headSha="abc1234", localApk=apk,
+           localApkSha="abc1234", blockedReason="Built and waiting", issue=3)
+    [p] = client.get("/api/v1/projects", headers=auth()).json()
+    assert p["status"] == "needs_you" and p["counts"]["needs_you"] == 1  # never silently idle
+    [t] = client.get("/api/v1/projects/lumen-launcher/tasks", headers=auth()).json()
+    assert t["phase"] == "awaiting_push" and t["prUrl"] is None
+    assert t["apk"] == apk  # the local build, because there is no CI to ask
+
+
+def test_a_parked_build_is_not_offered_when_it_is_for_another_commit(client, mercury, tmp_path):
+    _board(tmp_path, [("t_a", "blocked")])
+    _state(mercury, "t_a", phase="awaiting_push", headSha="new9999",
+           localApk=str(mercury / "apks" / "local-old-local.apk"), localApkSha="old1111")
+    [t] = client.get("/api/v1/projects/lumen-launcher/tasks", headers=auth()).json()
+    assert t["phase"] == "awaiting_push" and t["apk"] is None
+
+
+def test_a_local_build_never_stands_in_for_ci_on_a_task_in_review(client, mercury, tmp_path):
+    """The gates' own build is only the app's offer when nothing else can provide one:
+    a task in review waits for CI, exactly as before."""
+    _board(tmp_path, [("t_a", "review")])
+    _state(mercury, "t_a", phase="review", headSha="new9999", localApkSha="new9999",
+           localApk=str(mercury / "apks" / "local-old-local.apk"))
+    [t] = client.get("/api/v1/projects/lumen-launcher/tasks", headers=auth()).json()
+    assert t["phase"] == "review" and t["apk"] is None
+
+
+def test_the_project_view_says_how_it_pushes(client, mercury):
+    assert client.get("/api/v1/projects", headers=auth()).json()[0]["pushPolicy"] == "auto"
+    registry = json.loads((mercury / "projects.json").read_text())
+    registry["projects"][0]["pushPolicy"] = "test-first"
+    (mercury / "projects.json").write_text(json.dumps(registry))
+    assert client.get("/api/v1/projects", headers=auth()).json()[0]["pushPolicy"] == "test-first"
+
+
 def test_no_projects_is_an_empty_list(client, mercury):
     (mercury / "projects.json").unlink()
     assert client.get("/api/v1/projects", headers=auth()).json() == []

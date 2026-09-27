@@ -124,6 +124,14 @@ class _TaskCardState extends State<TaskCard> {
                     onPressed: () => _open(t.issueUrl),
                     icon: const Icon(Icons.open_in_new, size: 18),
                     label: const Text('Issue')),
+              if (t.canPush)
+                FilledButton.icon(
+                    key: Key('push-${t.id}'),
+                    onPressed: pending
+                        ? null
+                        : () => _ask(() => state.pushTask(widget.project.id, t.id), 'Open the PR'),
+                    icon: const Icon(Icons.upload, size: 18),
+                    label: Text(pending ? 'Asking Hermes…' : 'Push it')),
               if (t.canRetry)
                 TextButton.icon(
                     onPressed: pending

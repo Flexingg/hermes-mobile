@@ -88,6 +88,12 @@ never use `~` for them:
        python3 $B/mercury_ship.py publish --project <project> --task <task-id> --worktree "$PWD" \
          --title "<issue title>" --notes /tmp/mercury-<task-id>-notes.md --coder <claude|agy|hermes>
 
+   If the JSON comes back with `awaitingPush: true`, this project is set to
+   **test-first**: the change is committed and its debug build is kept, but
+   **nothing was pushed** and there is no PR yet. That is the correct end of your
+   run — say the build is ready to install and stop there. The user opens the PR
+   from the app, and Hermes re-runs `publish` with `--approved`.
+
 8. Save anything durable you learned about this repo to memory (build quirks,
    test commands). Reply with the PR URL. **Do not** mark the task complete yourself:
    publish moved it to review, and Mercury follows CI from there.

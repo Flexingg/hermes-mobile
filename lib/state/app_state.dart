@@ -879,9 +879,9 @@ class AppState extends ChangeNotifier {
   Future<String?> linkRepo(String repoName, {String coder = 'claude'}) =>
       _intent('link:$repoName', 'link_repo', payload: {'repo': repoName, 'coder': coder});
 
-  Future<String?> setProject(String id, {String? coder, String? gates}) =>
+  Future<String?> setProject(String id, {String? coder, String? gates, String? pushPolicy}) =>
       _intent('set:$id', 'set_project', project: id,
-          payload: {'coder': ?coder, 'gates': ?gates});
+          payload: {'coder': ?coder, 'gates': ?gates, 'pushPolicy': ?pushPolicy});
 
   Future<String?> unlinkProject(String id) async {
     final r = await _intent('unlink:$id', 'unlink', project: id);
@@ -894,6 +894,11 @@ class AppState extends ChangeNotifier {
 
   Future<String?> cancelTask(String project, String task) =>
       _intent('task:$task', 'cancel_task', project: project, payload: {'task': task});
+
+  /// "Push it": the project is set to test-first and this task is parked with its
+  /// build. The user has tested it, so Hermes re-runs publish with --approved.
+  Future<String?> pushTask(String project, String task) =>
+      _intent('push:$task', 'push_task', project: project, payload: {'task': task});
 
   /// "Suggest edits" on a task: Hermes puts the note back on the task's worker
   /// (same branch, same PR) — or, when the PR is already merged, hands it to the

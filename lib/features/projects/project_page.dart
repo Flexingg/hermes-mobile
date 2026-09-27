@@ -518,6 +518,25 @@ class _SettingsTabState extends State<_SettingsTab> {
               : (s) => _ask(() => state.setProject(p.id, coder: s.first), 'Coder'),
         ),
         const SizedBox(height: 24),
+        Text('Before it reaches GitHub', style: Theme.of(context).textTheme.titleSmall),
+        const SizedBox(height: 4),
+        Text('Who opens the PR. Either way the coder\'s work is committed on a branch '
+            'first; test-first just holds it there until you have installed the build.',
+            style: TextStyle(fontSize: 12, color: scheme.onSurfaceVariant)),
+        const SizedBox(height: 8),
+        SegmentedButton<String>(
+          segments: const [
+            ButtonSegment(value: 'auto', label: Text('Auto'), icon: Icon(Icons.bolt_outlined)),
+            ButtonSegment(value: 'test-first', label: Text('Test first'), icon: Icon(Icons.science_outlined)),
+          ],
+          selected: {p.testsFirst ? 'test-first' : 'auto'},
+          onSelectionChanged: pending
+              ? null
+              : (s) => _ask(
+                  () => state.setProject(p.id, pushPolicy: s.first),
+                  s.first == 'test-first' ? 'Test first' : 'Auto'),
+        ),
+        const SizedBox(height: 24),
         Text('Gates', style: Theme.of(context).textTheme.titleSmall),
         const SizedBox(height: 4),
         Text('The checks every change must pass before its PR opens.',

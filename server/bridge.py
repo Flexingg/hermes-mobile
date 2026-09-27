@@ -3154,7 +3154,9 @@ def _task_phase(status: str, state: dict) -> str:
     if status == "running":
         return "working"
     if status == "blocked":
-        return "needs_you"
+        # A task parked before the push is blocked on the user's test, which is a
+        # different thing from a blocked task: the app shows it as built-and-waiting.
+        return "awaiting_push" if phase == "awaiting_push" else "needs_you"
     if phase in ("ready", "merged", "closed", "needs_you") and status in ("review", "done", "archived"):
         return phase
     if status == "review":
@@ -3194,7 +3196,12 @@ def _board_tasks(project: dict) -> list[dict]:
             "prUrl": state.get("prUrl"),
             "ci": state.get("ci"),
             "failingChecks": state.get("failingChecks") or [],
-            "apk": state.get("apk"),
+            # A task parked before the push (test-first policy) has no CI yet: its
+            # test build is the one the gates produced for this same commit.
+            "apk": state.get("apk") or (
+                state.get("localApk")
+                if state.get("phase") == "awaiting_push" and state.get("localApkSha") == state.get("headSha")
+                else None),
             "coder": state.get("coder") or project.get("coder"),
             "branch": r["branch_name"],
             "blockedReason": state.get("blockedReason") or r["last_failure_error"],
@@ -3210,7 +3217,8 @@ def _project_view(project: dict, tasks: list[dict] | None = None) -> dict:
     counts: dict[str, int] = {}
     for t in tasks:
         counts[t["phase"]] = counts.get(t["phase"], 0) + 1
-    active = {"needs_you": counts.get("needs_you", 0), "ready": counts.get("ready", 0),
+    active = {"needs_you": counts.get("needs_you", 0) + counts.get("awaiting_push", 0),
+              "ready": counts.get("ready", 0),
               "working": sum(counts.get(k, 0) for k in ("working", "review", "ci_retry")),
               "queued": counts.get("queued", 0)}
     status = next((k for k in _STATUS_ORDER[:-1] if active.get(k)), "idle")
@@ -3219,6 +3227,9 @@ def _project_view(project: dict, tasks: list[dict] | None = None) -> dict:
         "profile": project["profile"], "coder": project.get("coder", "claude"),
         "gates": project.get("gates", ""), "defaultBranch": project.get("defaultBranch", "main"),
         "idleSleepMinutes": project.get("idleSleepMinutes", 10),
+        # "auto" (push as soon as the gates pass) or "test-first" (park it with its
+        # build and wait for the user's test before anything reaches GitHub).
+        "pushPolicy": project.get("pushPolicy", "auto"),
         "status": status, "counts": active, "awake": active["working"] > 0,
         "lastTask": tasks[0] if tasks else None, "color": _hash_color(project["id"]),
     }
@@ -3431,7 +3442,7 @@ _INTENTS = {
     "link_repo": "link repo", "set_project": "set project", "unlink": "unlink",
     "retry_task": "retry task", "cancel_task": "cancel task", "pause": "pause", "resume": "resume",
     "file_issue": "file issue", "edit_task": "edit task", "followup_issue": "follow-up issue",
-    "tunnel": "tunnel",
+    "tunnel": "tunnel", "push_task": "push task",
 }
 _PROJECT_INTENTS = ("file_issue", "followup_issue")
 
