@@ -11,6 +11,7 @@ enum TaskPhase {
   review('In review'),
   ciRetry('Fixing CI'),
   ready('Ready to test'),
+  awaitingPush('Built — not pushed'),
   needsYou('Needs you'),
   merged('Merged'),
   closed('Closed'),
@@ -26,6 +27,7 @@ enum TaskPhase {
         'review' => review,
         'ci_retry' => ciRetry,
         'ready' => ready,
+        'awaiting_push' => awaitingPush,
         'needs_you' => needsYou,
         'merged' => merged,
         'closed' => closed,
@@ -39,10 +41,18 @@ enum TaskPhase {
   String get wire => switch (this) {
         TaskPhase.ciRetry => 'ci_retry',
         TaskPhase.needsYou => 'needs_you',
+        TaskPhase.awaitingPush => 'awaiting_push',
         _ => name,
       };
 
-  bool get isActive => this == queued || this == working || this == review || this == ciRetry;
+  /// Work that has not finished yet. A task parked before the push belongs here:
+  /// the code is written and built, it just has not left the machine.
+  bool get isActive =>
+      this == queued ||
+      this == working ||
+      this == review ||
+      this == ciRetry ||
+      this == awaitingPush;
 
   /// The work is over: merged, closed, done or cancelled.
   bool get isFinished => !isActive && this != ready;
@@ -124,6 +134,10 @@ class ProjectTask {
   bool get canRetry => phase == TaskPhase.needsYou;
   bool get canCancel => phase == TaskPhase.queued;
 
+  /// Parked before the push (test-first policy): the build exists, the PR does not.
+  /// Tapping Push tells Hermes to re-run publish with --approved.
+  bool get canPush => phase == TaskPhase.awaitingPush;
+
   /// Tap-through: every task has a detail page, including finished ones.
   /// Suggesting an edit only makes sense once something exists to change.
   bool get canSuggestEdit => phase != TaskPhase.cancelled && phase != TaskPhase.queued;
@@ -150,6 +164,11 @@ class Project {
   final List<ProjectTask> tasks; // filled by the detail call only
   final Color color;
 
+  /// How the project's work reaches GitHub: 'auto' opens the PR as soon as the
+  /// gates pass; 'test-first' commits and builds, then waits for the user to
+  /// install the build and tap Push.
+  final String pushPolicy;
+
   const Project({
     required this.id,
     required this.name,
@@ -167,6 +186,7 @@ class Project {
     this.lastTask,
     this.tasks = const [],
     this.color = const Color(0xFF6750A4),
+    this.pushPolicy = 'auto',
   });
 
   factory Project.fromJson(Map<String, dynamic> j) {
@@ -192,10 +212,13 @@ class Project {
           .map((t) => ProjectTask.fromJson((t as Map).cast<String, dynamic>()))
           .toList(),
       color: Color((j['color'] as num?)?.toInt() ?? 0xFF6750A4),
+      pushPolicy: (j['pushPolicy'] ?? 'auto').toString(),
     );
   }
 
   String get coderLabel => coderName(coder);
+
+  bool get testsFirst => pushPolicy == 'test-first';
 }
 
 String coderName(String? coder) => switch (coder) {
@@ -361,4 +384,31 @@ class IntentResult {
   final String sessionId;
   final String reply;
   const IntentResult({required this.sessionId, required this.reply});
+}
+
+/// A note you jotted on a project. Deliberately not [MemoryEntry]: memory is
+/// injected into the agent's prompt on every turn, so it costs tokens forever
+/// and can steer the agent. A note is inert — it never reaches a model until you
+/// tap "Ask the agent" on it.
+class ProjectNote {
+  final String id;
+  final String text;
+  final DateTime at;
+  final DateTime? updatedAt;
+  const ProjectNote({
+    required this.id,
+    required this.text,
+    required this.at,
+    this.updatedAt,
+  });
+
+  factory ProjectNote.fromJson(Map<String, dynamic> j) {
+    final edited = (j['updatedAt'] ?? '').toString();
+    return ProjectNote(
+      id: (j['id'] ?? '').toString(),
+      text: (j['text'] ?? '').toString(),
+      at: DateTime.tryParse((j['at'] ?? '').toString()) ?? DateTime.now(),
+      updatedAt: edited.isEmpty ? null : DateTime.tryParse(edited),
+    );
+  }
 }

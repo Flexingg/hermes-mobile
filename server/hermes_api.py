@@ -32,6 +32,14 @@ DEFAULT_URL = "http://127.0.0.1:8642"
 HEALTH_TTL = 30.0  # seconds a health result is trusted
 CONNECT_TIMEOUT = 5.0
 TURN_TIMEOUT = 1800.0  # a single agent turn may run tools for a long time
+# The note relayed to a running turn when Stop is pressed once. It is a steer,
+# not an interrupt: the step in flight finishes, then the model ends the turn.
+# Phrased as the user speaking, because that is the role it arrives in.
+STOP_STEER_NOTE = (
+    "The user pressed Stop. Do not start anything new. Finish the single step you are "
+    "on, then end your turn right away with a short summary of where things stand and "
+    "what is left unfinished."
+)
 # What a broken connection or a malformed response can raise. HTTPException
 # (BadStatusLine, IncompleteRead, ...) is not an OSError, and letting it escape
 # would end the relay thread without the "done" the app is waiting for.
@@ -195,10 +203,16 @@ class HermesApi:
         }
 
     def stream_chat(self, session_id: str, text: str, emit: Callable[[dict], None],
-                    profile: str | None = None, system: str | None = None) -> None:
+                    profile: str | None = None, system: str | None = None,
+                    on_run: Callable[[str], None] | None = None) -> None:
         """Run one turn and relay it as bridge chunks through ``emit``.
 
         Emits ``{"event": "chunk", ...}`` payloads only; the caller sends ``done``.
+        ``on_run`` is called once with the run id the gateway assigned to this
+        turn (from its ``run.started`` event). That id is the handle
+        :meth:`steer_run` and :meth:`stop_run` need to interrupt the turn — the
+        gateway exposes no session-keyed stop, so without it a turn can only be
+        killed by dropping this connection.
         Raises HermesApiError with ``started=False`` when nothing was relayed yet
         (the caller may fall back to the CLI), ``started=True`` otherwise.
         """
@@ -221,6 +235,10 @@ class HermesApi:
                     data = {}
                 raise HermesApiError(_error_text(data, f"HTTP {resp.status}"), status=resp.status)
             for name, payload in iter_sse(resp):
+                if name == "run.started" and on_run is not None:
+                    run_id = payload.get("run_id")
+                    if run_id:
+                        on_run(str(run_id))
                 chunk = to_chunk(name, payload)
                 if chunk is not None:
                     started = True
@@ -234,6 +252,53 @@ class HermesApi:
             raise HermesApiError(f"stream interrupted: {exc}", started=started) from exc
         finally:
             conn.close()
+
+    def stream_turn(self, text: str, emit: Callable[[dict], None],
+                    profile: str | None = None, system: str | None = None,
+                    on_run: Callable[[str], None] | None = None) -> str:
+        """One turn for a caller that has no Hermes session of its own.
+
+        The gateway runs every turn against a session, so create one, stream the
+        turn into it and hand its id back. Relay contract is stream_chat's:
+        HermesApiError with started=False when nothing was relayed yet, so the
+        caller can still fall back to the CLI.
+        """
+        sid = self.create_session(profile=profile)
+        self.stream_chat(sid, text, emit, profile=profile, system=system, on_run=on_run)
+        return sid
+
+
+    # -- live turn control ---------------------------------------------------
+    def steer_run(self, run_id: str, text: str, profile: str | None = None) -> bool:
+        """Inject a note into a running turn without interrupting it.
+
+        The gateway appends it to the next tool result, so the model sees it at
+        a role-safe boundary. That is what makes this the *graceful* half of
+        Stop: the step in flight finishes, then the model wraps up. False means
+        the run already ended or is not accepting steer input — not an error.
+        """
+        status, data = self._request(
+            "POST", f"/v1/runs/{quote(run_id, safe='')}/steer", {"input": text},
+            timeout=CONNECT_TIMEOUT, profile=profile,
+        )
+        if status in (404, 409):
+            return False
+        if status != 200:
+            raise HermesApiError(_error_text(data, "could not steer the run"), status=status)
+        return bool(data.get("accepted", True))
+
+    def stop_run(self, run_id: str, profile: str | None = None) -> bool:
+        """Hard-stop a running turn: the gateway interrupts it and reaps the
+        processes it started. False means the run was already gone."""
+        status, data = self._request(
+            "POST", f"/v1/runs/{quote(run_id, safe='')}/stop", {},
+            timeout=CONNECT_TIMEOUT, profile=profile,
+        )
+        if status == 404:
+            return False
+        if status != 200:
+            raise HermesApiError(_error_text(data, "could not stop the run"), status=status)
+        return True
 
 
 def _turn_body(text: str, system: str | None) -> dict:

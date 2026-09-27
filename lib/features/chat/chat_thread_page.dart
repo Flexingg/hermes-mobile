@@ -299,6 +299,15 @@ class _ChatThreadPageState extends State<ChatThreadPage> {
         ? state.messagesFor(_effectiveId(state)).last
         : null;
     final toolActive = last != null && last.role == ChatMessageRole.tool;
+    // Stop is two-stage, so say which stage it is in: "after this step" is a
+    // promise about the reply's shape, and the user should be able to see it.
+    final label = state.stoppingHard
+        ? 'Stopping now…'
+        : state.stopRequested
+            ? 'Stopping after this step…'
+            : toolActive
+                ? 'Hermes is running a tool…'
+                : 'Hermes is typing…';
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
       child: Row(
@@ -308,7 +317,7 @@ class _ChatThreadPageState extends State<ChatThreadPage> {
               height: 14,
               child: CircularProgressIndicator(strokeWidth: 2)),
           const SizedBox(width: 10),
-          Text(toolActive ? 'Hermes is running a tool…' : 'Hermes is typing…',
+          Text(label,
               style: TextStyle(
                   fontSize: 12, color: scheme.onSurfaceVariant)),
         ],

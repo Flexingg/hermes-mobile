@@ -32,8 +32,16 @@ never use `~` for them:
 
        python3 $B/mercury_ship.py prepare --project <project> --task <task-id> --worktree "$PWD"
 
-2. **Understand.** Read the issue text, the repo's `AGENTS.md` / `CLAUDE.md` / `README`,
-   and your memory for this project. Look at the code the issue touches.
+2. **Understand.** Start with the project's context digest — it is written for you and
+   is deliberately short:
+
+       python3 $B/mercury_context.py show --project <project>
+
+   It holds the build/test commands, the layout and the conventions. Read the repo's
+   `AGENTS.md` / `CLAUDE.md` only if the digest is missing or the issue touches
+   something it does not cover: a full `README` is thousands of tokens you usually
+   do not need. Then read your memory for this project and look at the code the
+   issue touches.
 
 3. **Write the coding brief** to `/tmp/mercury-<task-id>-brief.md` (never inside the
    worktree, or it would be committed). Include:
@@ -79,6 +87,12 @@ never use `~` for them:
 
        python3 $B/mercury_ship.py publish --project <project> --task <task-id> --worktree "$PWD" \
          --title "<issue title>" --notes /tmp/mercury-<task-id>-notes.md --coder <claude|agy|hermes>
+
+   If the JSON comes back with `awaitingPush: true`, this project is set to
+   **test-first**: the change is committed and its debug build is kept, but
+   **nothing was pushed** and there is no PR yet. That is the correct end of your
+   run — say the build is ready to install and stop there. The user opens the PR
+   from the app, and Hermes re-runs `publish` with `--approved`.
 
 8. Save anything durable you learned about this repo to memory (build quirks,
    test commands). Reply with the PR URL. **Do not** mark the task complete yourself:

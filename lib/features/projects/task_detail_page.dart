@@ -208,6 +208,16 @@ class _TaskDetailPageState extends State<TaskDetailPage> {
                 onPressed: _openChat,
                 icon: const Icon(Icons.forum_outlined, size: 18),
                 label: Text('Ask ${widget.project.name}')),
+            if (t.canPush)
+              FilledButton.icon(
+                  key: Key('push-${t.id}'),
+                  onPressed: state.intentPending('push:${t.id}')
+                      ? null
+                      : () => _ask(
+                          () => context.read<AppState>().pushTask(widget.project.id, t.id),
+                          'Open the PR'),
+                  icon: const Icon(Icons.upload, size: 18),
+                  label: const Text('Push it')),
             if (t.canRetry)
               OutlinedButton.icon(
                   onPressed: state.intentPending('task:${t.id}')

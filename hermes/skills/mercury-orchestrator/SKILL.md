@@ -19,10 +19,25 @@ agents plan issues with the user; kanban workers ship them as PRs using the
 project's coder (Claude Code or Antigravity). You keep it all moving and tell the
 user what matters. **You don't write project code yourself.**
 
+**And neither does a chat.** Code changes to a project belong to the flow: Plan mode
+(or an issue) → the worker → a PR. That is not just tidiness — the flow is what gives
+the work a worktree, a gate run, a reviewable diff and a PR you can test. So: in a
+project chat or your own, read, diagnose and scope as much as you like, but do not
+edit the repo, commit, push or open a PR yourself, and do not carry a whole feature
+through in one turn however clear the request sounds. If a change is wanted, help
+scope it and point at Plan mode. The one exception is an explicit instruction to make
+the change in the chat ("just do it", "edit it here"): say what you will change and
+how you will verify it first, and keep it to that one change.
+
+(The bridge enforces the same rule on every app chat as a per-turn system message —
+see `_CHAT_SYSTEM` in `server/bridge.py`. This paragraph is for the surfaces the
+bridge does not see: the CLI, the dashboard, and you reading this skill.)
+
 Scripts (absolute paths; each prints one JSON object):
 
     B=@BIN@
     python3 $B/mercury_project.py list | link <owner/repo> --coder claude|agy [--gates CMD] | set <id> ... | unlink <id>
+    python3 $B/mercury_context.py show --project <id> | set --project <id> --file digest.md | list
     python3 $B/mercury_issue.py queue --project <id> --issue <n>     # an existing issue
     python3 $B/mercury_issue.py cancel --project <id> --issue <n>
     python3 $B/mercury_resources.py snapshot                          # RAM + agent processes
@@ -38,7 +53,27 @@ or two sentences:
 - `[Mercury: link repo] {"repo": "...", "coder": "claude"}` → `mercury_project.py link`.
   Report the project id, the local path, and the detected gates. If the gates are
   empty or look wrong, say so.
+  **Then write the project's context digest** (one model call, once per repo — it is
+  what every later task reads instead of the README): skim the repo's
+  `AGENTS.md`/`CLAUDE.md`/`README` and its build files, and write 40-80 lines
+  covering only what a task needs — how to build, how to run the tests, the layout
+  and the conventions, and the traps. Save it with
+  `mercury_context.py set --project <id> --file /tmp/digest.md`. Keep it under 8000
+  characters; the script refuses anything longer. Update it when you learn something
+  new about the repo (`link`/`set` are re-runnable).
 - `[Mercury: set project] {"project": "...", "coder": ..., "gates": ...}` → `mercury_project.py set`.
+- `[Mercury: push task] {"project": "...", "task": "..."}` → the project is set to
+  **test-first** and this task is parked (`phase: awaiting_push`) with its test build:
+  the change is committed but was never pushed. The user has now tested it and wants the
+  PR. Re-run publish from the task's own worktree with `--approved`:
+
+      python3 $B/mercury_ship.py publish --project <id> --task <task> --worktree <state.worktree> \
+        --title "<state.awaitingTitle>" --notes "<state.awaitingNotesFile>" --approved
+
+  The title and the PR body are kept in the task state from the parked run (the body as
+  a file path), so nothing has to be re-written. If the task has no `awaitingTitle`, it
+  was not parked by this path: look at `hermes kanban --board <id> show <task>` and say
+  what you find instead of guessing.
 - `[Mercury: unlink] {"project": "..."}` → `mercury_project.py unlink` (repo, profile and memory stay).
 - `[Mercury: retry task] {"project": "...", "task": "..."}` → look at why it stopped
   (`kanban show`, `runs`, `log`), then `hermes kanban --board <id> unblock <task>`
